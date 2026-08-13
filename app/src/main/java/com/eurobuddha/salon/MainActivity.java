@@ -10,6 +10,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -20,6 +22,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.MediaController;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.VideoView;
@@ -264,10 +267,7 @@ public class MainActivity extends AppCompatActivity {
         for (JSONObject post : posts) {
             LinearLayout c = card();
             LinearLayout head = row();
-            ImageView av = new ImageView(this); av.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            av.setImageBitmap(Identicon.forToken(post.optString("_tid"), 120));
-            if (!post.optString("_avatar").isEmpty()) ImageLoader.loadFull(this, post.optString("_avatar"), av);
-            head.addView(av, new LinearLayout.LayoutParams(dp(34), dp(34)));
+            head.addView(avatarView(post.optString("_avatar"), post.optString("_author"), 34));
             TextView who = Design.text(this, "@" + post.optString("_author"), 13, Design.ACCENT(), Design.sansBold());
             who.setPadding(dp(9), 0, 0, 0);
             who.setOnClickListener(v -> openTokenProfile(post.optString("_tid")));
@@ -296,16 +296,25 @@ public class MainActivity extends AppCompatActivity {
                 LinearLayout c = card(); c.setClickable(true); Design.pressable(c);
                 c.setOnClickListener(v -> openProfile(e));
                 LinearLayout r = row();
-                ImageView av = new ImageView(this); av.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                av.setImageBitmap(Identicon.forToken(e.tokenid, 120));
-                r.addView(av, new LinearLayout.LayoutParams(dp(40), dp(40)));
-                LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(10), 0, 0, 0);
-                col.addView(Design.text(this, "@" + e.handle, 15, Design.INK(), Design.sansBold()));
-                col.addView(Design.text(this, Util.shorten(e.tokenid), 10.5f, Design.DIM(), Design.mono()));
+                final FrameLayout avSlot = new FrameLayout(this);
+                avSlot.addView(avatarView("", e.handle, 48));
+                r.addView(avSlot, new LinearLayout.LayoutParams(dp(48), dp(48)));
+                LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, 0, 0);
+                final TextView nameTv = Design.text(this, e.handle.isEmpty() ? "…" : e.handle, 16, Design.INK(), Design.sansBold());
+                final TextView handleTv = Design.text(this, "@" + e.handle, 12, Design.ACCENT(), Design.mono());
+                final TextView bioTv = Design.text(this, "", 12.5f, Design.DIM(), Design.sans()); bioTv.setMaxLines(2); bioTv.setVisibility(View.GONE);
+                col.addView(nameTv); col.addView(handleTv); col.addView(bioTv);
                 r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
                 if (SalonStore.isFollowing(this, e.tokenid)) r.addView(Design.pill(this, "following", Design.PILL_DONE));
                 c.addView(r);
                 body.addView(c, lp(0, 0, 0, 10));
+                // enrich the card from the hosted profile: real avatar, display name, bio
+                io.execute(() -> { JSONObject prof = httpGetJson(e.url); if (prof == null) return; runOnUiThread(() -> {
+                    String nm = prof.optString("name", ""), av = prof.optString("avatar", ""), bio = prof.optString("bio", "");
+                    if (!nm.isEmpty()) nameTv.setText(nm);
+                    if (!av.isEmpty()) { avSlot.removeAllViews(); avSlot.addView(avatarView(av, e.handle, 48)); }
+                    if (!bio.isEmpty()) { bioTv.setText(bio); bioTv.setVisibility(View.VISIBLE); }
+                }); });
             }
         }));
     }
@@ -359,10 +368,7 @@ public class MainActivity extends AppCompatActivity {
             headCard.addView(bn, new LinearLayout.LayoutParams(-1, dp(130)));
         }
         LinearLayout idrow = row();
-        ImageView av = new ImageView(this); av.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        av.setImageBitmap(Identicon.forToken(p.optString("tokenid"), 220));
-        if (!p.optString("avatar").isEmpty()) ImageLoader.loadFull(this, p.optString("avatar"), av);
-        idrow.addView(av, new LinearLayout.LayoutParams(dp(66), dp(66)));
+        idrow.addView(avatarView(p.optString("avatar"), p.optString("handle"), 66));
         LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, 0, 0);
         col.addView(Design.text(this, p.optString("name"), 19, Design.INK(), Design.sansBold()));
         TextView h = Design.text(this, "@" + p.optString("handle"), 13, Design.ACCENT(), Design.mono());
@@ -407,7 +413,10 @@ public class MainActivity extends AppCompatActivity {
         JSONArray gal = p.optJSONArray("gallery");
         if (gal != null && gal.length() > 0) {
             LinearLayout c = card(); c.addView(Design.lot(this, "Gallery"));
-            c.addView(mediaGrid(gal), lp(0, 8, 0, 0));
+            for (int i = 0; i < gal.length(); i++) {
+                JSONObject m = gal.optJSONObject(i); if (m == null) continue;
+                c.addView(mediaCard(m), lp(0, 10, 0, 0));
+            }
             body.addView(c, lp(0, 0, 0, 12));
         }
 
@@ -467,7 +476,21 @@ public class MainActivity extends AppCompatActivity {
         // Gallery
         LinearLayout galCard = card(); galCard.addView(Design.lot(this, "Gallery — photos, video, music"));
         JSONArray gal = SalonStore.arr(this, "gallery");
-        if (gal.length() > 0) galCard.addView(mediaGrid(gal), lp(0, 8, 0, 6));
+        for (int i = 0; i < gal.length(); i++) {
+            JSONObject m = gal.optJSONObject(i); if (m == null) continue; final int idx = i;
+            String type = m.optString("type", "image"), cap = m.optString("caption", "");
+            LinearLayout r = row(); r.setPadding(0, dp(6), 0, dp(6));
+            TextView kind = Design.text(this, type.equals("audio") ? "♪" : type.equals("video") ? "▶" : "▣", 18, Design.ACCENT(), Design.sansBold());
+            r.addView(kind, new LinearLayout.LayoutParams(dp(28), -2));
+            LinearLayout cc = new LinearLayout(this); cc.setOrientation(LinearLayout.VERTICAL); cc.setPadding(dp(8), 0, 0, 0);
+            cc.addView(Design.text(this, cap.isEmpty() ? "(untitled)" : cap, 13.5f, Design.INK(), Design.sansBold()));
+            cc.addView(Design.text(this, type.toUpperCase(), 9f, Design.DIM(), Design.sansBold()));
+            r.addView(cc, new LinearLayout.LayoutParams(0, -2, 1));
+            r.addView(btn("Rename", false, () -> renameGalleryItem(idx)), new LinearLayout.LayoutParams(dp(88), dp(38)));
+            r.addView(btn("✕", false, () -> { JSONArray a = removeAt(SalonStore.arr(this, "gallery"), idx); SalonStore.setArr(this, "gallery", a); render(); }), new LinearLayout.LayoutParams(dp(44), dp(38)));
+            galCard.addView(r);
+            galCard.addView(Design.rule(this, 1), new LinearLayout.LayoutParams(-1, dp(1)));
+        }
         LinearLayout addRow = row();
         addRow.addView(btn("+ Photo", false, () -> pickMedia(PICK_GALLERY_IMG, "image/*")), weight(42, 0, 4));
         addRow.addView(btn("+ Video", false, () -> pickMedia(PICK_GALLERY_VID, "video/*")), weight(42, 4, 4));
@@ -539,82 +562,177 @@ public class MainActivity extends AppCompatActivity {
                 String rel = handle + "/media/" + kind + "-" + Long.toString(System.currentTimeMillis(), 36) + ext;
                 String url = Hosting.forProfile(def).putFile(bytes, rel, mime);
                 runOnUiThread(() -> {
-                    if (r == PICK_AVATAR && edAvatar != null) { edAvatar.setText(url); SalonStore.put(this, "avatar", url); }
-                    else if (r == PICK_BANNER && edBanner != null) { edBanner.setText(url); SalonStore.put(this, "banner", url); }
-                    else { JSONArray a = SalonStore.arr(this, "gallery"); try { JSONObject o = new JSONObject(); o.put("type", kind); o.put("url", url); a.put(o); } catch (Exception ignored) {} SalonStore.setArr(this, "gallery", a); render(); }
+                    if (r == PICK_AVATAR && edAvatar != null) { edAvatar.setText(url); SalonStore.put(this, "avatar", url); render(); }
+                    else if (r == PICK_BANNER && edBanner != null) { edBanner.setText(url); SalonStore.put(this, "banner", url); render(); }
+                    else promptMediaTitle(kind, url);
                     if (profStatus != null) profStatus.setText("Uploaded.");
                 });
             } catch (Exception e) { runOnUiThread(() -> { if (profStatus != null) profStatus.setText("Upload failed: " + e.getMessage()); }); }
         });
     }
 
-    private LinearLayout mediaGrid(JSONArray items) {
-        LinearLayout grid = new LinearLayout(this); grid.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout r = null;
-        for (int i = 0; i < items.length(); i++) {
-            JSONObject m = items.optJSONObject(i); if (m == null) continue;
-            if (i % 3 == 0) { r = new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); grid.addView(r, lp(0, 0, 0, 6)); }
-            r.addView(mediaTile(m), tileLp(i % 3));
-        }
-        if (r != null) { int rem = items.length() % 3; for (int k = 0; k < (rem == 0 ? 0 : 3 - rem); k++) { View sp = new View(this); r.addView(sp, tileLp(1)); } }
-        return grid;
+    private void promptMediaTitle(String kind, String url) {
+        LinearLayout box = dialogBox();
+        String label = kind.equals("audio") ? "Track title" : kind.equals("video") ? "Video title" : "Photo caption";
+        EditText t = field(box, label, "", false, kind.equals("audio") ? "Song name — artist" : "");
+        new android.app.AlertDialog.Builder(this).setTitle("Add to gallery").setView(box).setCancelable(false)
+                .setPositiveButton("Add", (d, w) -> addGalleryItem(kind, url, text(t)))
+                .setNegativeButton("Skip title", (d, w) -> addGalleryItem(kind, url, "")).show();
     }
 
-    private LinearLayout.LayoutParams tileLp(int col) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(96), 1); if (col > 0) p.leftMargin = dp(6); return p; }
+    private void addGalleryItem(String kind, String url, String caption) {
+        JSONArray a = SalonStore.arr(this, "gallery");
+        try { JSONObject o = new JSONObject(); o.put("type", kind); o.put("url", url); o.put("caption", caption == null ? "" : caption.trim()); a.put(o); } catch (Exception ignored) {}
+        SalonStore.setArr(this, "gallery", a); render();
+    }
 
-    private View mediaTile(JSONObject m) {
-        String type = m.optString("type", "image"), url = m.optString("url");
-        FrameLayout f = new FrameLayout(this); f.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
+    private void renameGalleryItem(int idx) {
+        JSONArray a = SalonStore.arr(this, "gallery");
+        JSONObject m = a.optJSONObject(idx); if (m == null) return;
+        LinearLayout box = dialogBox();
+        EditText t = field(box, "Title / caption", m.optString("caption", ""), false, "");
+        showDialog("Rename", box, "Save", () -> { try { m.put("caption", text(t).trim()); } catch (Exception ignored) {} SalonStore.setArr(this, "gallery", a); render(); });
+    }
+
+    /** A full-width media card: a labelled header (KIND + title) over the media
+     *  itself — image (tap to zoom), video (tap to play fullscreen), or an audio
+     *  row with its own player modal. */
+    private View mediaCard(JSONObject m) {
+        String type = m.optString("type", "image"), url = m.optString("url"), cap = m.optString("caption", "");
+        LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL);
+        col.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
+
+        LinearLayout head = new LinearLayout(this); head.setOrientation(LinearLayout.VERTICAL); head.setPadding(dp(11), dp(9), dp(11), dp(8));
+        String kindLabel = type.equals("audio") ? "MUSIC" : type.equals("video") ? "VIDEO" : "PHOTO";
+        TextView kt = Design.text(this, kindLabel, 8.5f, Design.ACCENT(), Design.sansBold()); kt.setLetterSpacing(0.14f);
+        head.addView(kt);
+        if (!cap.isEmpty()) head.addView(Design.text(this, cap, 15, Design.INK(), Design.sansBold()));
+        col.addView(head);
+
         if ("image".equals(type)) {
-            ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            ImageView iv = new ImageView(this); iv.setAdjustViewBounds(true); iv.setMaxHeight(dp(360)); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setBackgroundColor(0xFF141310);
             if (!url.isEmpty()) ImageLoader.loadFull(this, url, iv);
-            f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
-        } else {
-            TextView glyph = Design.text(this, "video".equals(type) ? "▶" : "♪", 26, Design.INK(), Design.sansBold());
-            glyph.setGravity(Gravity.CENTER);
-            f.addView(glyph, new FrameLayout.LayoutParams(-1, -1));
+            iv.setClickable(true); iv.setOnClickListener(v -> openImage(url));
+            col.addView(iv, new LinearLayout.LayoutParams(-1, -2));
+        } else if ("video".equals(type)) {
+            FrameLayout f = new FrameLayout(this); f.setBackgroundColor(0xFF141310);
+            TextView play = Design.text(this, "▶  TAP TO PLAY", 13, 0xFFF2F1EC, Design.sansBold()); play.setGravity(Gravity.CENTER);
+            f.addView(play, new FrameLayout.LayoutParams(-1, -1));
+            f.setClickable(true); f.setOnClickListener(v -> openVideo(url));
+            col.addView(f, new LinearLayout.LayoutParams(-1, dp(190)));
+        } else { // audio
+            LinearLayout ar = row(); ar.setPadding(dp(11), dp(2), dp(11), dp(12));
+            TextView note = Design.text(this, "♪", 26, Design.INK(), Design.sansBold());
+            ar.addView(note, new LinearLayout.LayoutParams(dp(38), -2));
+            ar.addView(btn("▶ Play", true, () -> openAudioPlayer(url, cap.isEmpty() ? "Untitled track" : cap)), new LinearLayout.LayoutParams(0, dp(46), 1));
+            col.addView(ar);
         }
-        f.setClickable(true);
-        f.setOnClickListener(v -> playMedia(type, url));
-        return f;
+        return col;
     }
 
-    private void playMedia(String type, String url) {
-        if (url.isEmpty()) return;
-        if ("audio".equals(type)) { toggleAudio(url); return; }
+    private void openImage(String url) {
+        if (url == null || url.isEmpty()) return;
         Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
-        if ("video".equals(type)) {
-            VideoView vv = new VideoView(this);
-            MediaController mc = new MediaController(this); mc.setAnchorView(vv);
-            vv.setMediaController(mc); vv.setVideoURI(Uri.parse(url));
-            FrameLayout fl = new FrameLayout(this); fl.setBackgroundColor(0xFF000000);
-            fl.addView(vv, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
-            fl.setOnClickListener(v -> d.dismiss());
-            d.setContentView(fl); d.show(); vv.start();
-        } else {
-            ImageView iv = new ImageView(this); iv.setBackgroundColor(0xFF000000); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            ImageLoader.loadFull(this, url, iv); iv.setOnClickListener(v -> d.dismiss());
-            d.setContentView(iv); d.show();
-        }
+        ImageView iv = new ImageView(this); iv.setBackgroundColor(0xFF000000); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        ImageLoader.loadFull(this, url, iv); iv.setOnClickListener(v -> d.dismiss());
+        d.setContentView(iv); d.show();
     }
 
-    private void toggleAudio(String url) {
-        try {
-            if (audio != null && audio.isPlaying()) { stopAudio(); toast("Paused"); return; }
-            stopAudio(); audio = new MediaPlayer();
-            audio.setDataSource(url); audio.setOnPreparedListener(MediaPlayer::start); audio.prepareAsync();
-            toast("Playing…");
-        } catch (Exception e) { toast("Couldn't play: " + e.getMessage()); }
+    private void openVideo(String url) {
+        if (url == null || url.isEmpty()) return;
+        Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+        VideoView vv = new VideoView(this);
+        MediaController mc = new MediaController(this); mc.setAnchorView(vv);
+        vv.setMediaController(mc); vv.setVideoURI(Uri.parse(url));
+        FrameLayout fl = new FrameLayout(this); fl.setBackgroundColor(0xFF000000);
+        fl.addView(vv, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        d.setContentView(fl); d.show();
+        vv.setOnPreparedListener(mp -> { mp.setLooping(false); vv.start(); mc.show(0); });
     }
+
+    /** A proper audio modal: title, seek bar with elapsed/total, and
+     *  rewind-10 / play-pause / stop / forward-10 controls. */
+    private void openAudioPlayer(String url, String title) {
+        if (url == null || url.isEmpty()) return;
+        stopAudio();
+        final MediaPlayer mp = new MediaPlayer(); audio = mp;
+        final Handler handler = new Handler(Looper.getMainLooper());
+
+        Dialog d = new Dialog(this);
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(Design.blockShadow(this, Design.CARD())); box.setPadding(dp(18), dp(18), dp(18), dp(18));
+        box.addView(Design.text(this, "NOW PLAYING", 9f, Design.ACCENT(), Design.sansBold()));
+        box.addView(Design.text(this, title, 17, Design.INK(), Design.sansBold()), lp(0, 2, 0, 12));
+
+        final SeekBar bar = new SeekBar(this); bar.setMax(1000); bar.getProgressDrawable().setColorFilter(Design.ACCENT(), android.graphics.PorterDuff.Mode.SRC_IN); bar.getThumb().setColorFilter(Design.ACCENT(), android.graphics.PorterDuff.Mode.SRC_IN);
+        box.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout times = row();
+        final TextView cur = Design.text(this, "0:00", 11, Design.DIM(), Design.mono());
+        final TextView tot = Design.text(this, "–:--", 11, Design.DIM(), Design.mono()); tot.setGravity(Gravity.END);
+        times.addView(cur, new LinearLayout.LayoutParams(0, -2, 1)); times.addView(tot, new LinearLayout.LayoutParams(0, -2, 1));
+        box.addView(times, lp(0, 2, 0, 10));
+
+        final TextView playBtn = btn("❚❚ Pause", true, null);
+        LinearLayout controls = row();
+        controls.addView(btn("⏪ 10", false, () -> { if (mp.getDuration() > 0) mp.seekTo(Math.max(0, mp.getCurrentPosition() - 10000)); }), weight(46, 0, 4));
+        controls.addView(playBtn, weight(46, 4, 4));
+        controls.addView(btn("10 ⏩", false, () -> { if (mp.getDuration() > 0) mp.seekTo(Math.min(mp.getDuration(), mp.getCurrentPosition() + 10000)); }), weight(46, 4, 0));
+        box.addView(controls, lp(0, 0, 0, 8));
+        box.addView(btn("■ Stop", false, () -> { try { mp.pause(); mp.seekTo(0); } catch (Exception ignored) {} playBtn.setText("▶ Play"); }), lph(46, 0, 0, 0, 0));
+
+        playBtn.setOnClickListener(v -> { try { if (mp.isPlaying()) { mp.pause(); playBtn.setText("▶ Play"); } else { mp.start(); playBtn.setText("❚❚ Pause"); } } catch (Exception ignored) {} });
+
+        final Runnable[] tick = new Runnable[1];
+        tick[0] = () -> {
+            try { if (mp.getDuration() > 0) { bar.setProgress((int) (1000L * mp.getCurrentPosition() / mp.getDuration())); cur.setText(fmtTime(mp.getCurrentPosition())); } } catch (Exception ignored) {}
+            handler.postDelayed(tick[0], 500);
+        };
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) { if (fromUser && mp.getDuration() > 0) mp.seekTo((int) (mp.getDuration() * (p / 1000f))); }
+            public void onStartTrackingTouch(SeekBar s) {} public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        try {
+            mp.setDataSource(url);
+            mp.setOnPreparedListener(x -> { tot.setText(fmtTime(mp.getDuration())); mp.start(); playBtn.setText("❚❚ Pause"); handler.post(tick[0]); });
+            mp.setOnCompletionListener(x -> playBtn.setText("▶ Play"));
+            mp.prepareAsync();
+        } catch (Exception e) { toast("Couldn't play: " + e.getMessage()); }
+
+        d.setContentView(box);
+        d.setOnDismissListener(x -> { handler.removeCallbacksAndMessages(null); stopAudio(); });
+        d.show();
+    }
+
+    private String fmtTime(int ms) { int s = ms / 1000; return s / 60 + ":" + String.format("%02d", s % 60); }
 
     private void stopAudio() { if (audio != null) { try { audio.release(); } catch (Exception ignored) {} audio = null; } }
+
+    /** A real avatar (round-cornered photo) or, when none is set, a clean
+     *  letter monogram — no auto-generated identicon. */
+    private View avatarView(String url, String label, int sizeDp) {
+        if (url != null && !url.isEmpty()) {
+            ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            iv.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
+            ImageLoader.loadFull(this, url, iv);
+            iv.setLayoutParams(new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
+            return iv;
+        }
+        FrameLayout f = new FrameLayout(this); f.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 2));
+        String ltr = (label == null || label.trim().isEmpty()) ? "·" : label.trim().substring(0, 1).toUpperCase();
+        TextView t = Design.text(this, ltr, sizeDp * 0.44f, Design.ACCENT(), Design.sansBold()); t.setGravity(Gravity.CENTER);
+        f.addView(t, new FrameLayout.LayoutParams(-1, -1));
+        f.setLayoutParams(new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
+        return f;
+    }
 
     private void addPostMedia(LinearLayout parent, JSONObject post) {
         String type = post.optString("type", post.optString("mtype", "")), media = post.optString("media", "");
         if (media.isEmpty()) return;
         if (type.isEmpty()) type = "image";
-        JSONArray one = new JSONArray(); try { JSONObject o = new JSONObject(); o.put("type", type); o.put("url", media); one.put(o); } catch (Exception ignored) {}
-        parent.addView(mediaGrid(one), lp(0, 4, 0, 2));
+        JSONObject m = new JSONObject(); try { m.put("type", type); m.put("url", media); m.put("caption", ""); } catch (Exception ignored) {}
+        parent.addView(mediaCard(m), lp(0, 6, 0, 2));
     }
 
     /* ================= ONBOARD / claim (unchanged core) ================= */
@@ -892,11 +1010,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private byte[] readScaledJpeg(Uri uri, int maxDim) throws Exception {
-        InputStream in = getContentResolver().openInputStream(uri); Bitmap bmp = BitmapFactory.decodeStream(in); if (in != null) in.close();
+        // ImageTools.boundedBitmap decodes via ImageDecoder, which applies EXIF
+        // orientation exactly once — the Atelier fix for sideways Samsung photos.
+        Bitmap bmp = ImageTools.boundedBitmap(this, uri, maxDim);
         if (bmp == null) throw new Exception("could not read image");
-        int w = bmp.getWidth(), h = bmp.getHeight(); float k = Math.min(1f, (float) maxDim / Math.max(w, h));
-        if (k < 1f) bmp = Bitmap.createScaledBitmap(bmp, Math.round(w * k), Math.round(h * k), true);
-        ByteArrayOutputStream bos = new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG, 88, bos); return bos.toByteArray();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG, 90, bos); return bos.toByteArray();
     }
 
     /* ================= UI helpers ================= */
