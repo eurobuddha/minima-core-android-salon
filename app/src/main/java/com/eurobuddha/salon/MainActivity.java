@@ -72,11 +72,16 @@ public class MainActivity extends AppCompatActivity {
     private Screen screen = Screen.HOME;
 
     private LinearLayout appbar, navRow, body;
+    private ScrollView scroll;
     private FrameLayout rootFrame;
     private TextView nodeChip;
     private boolean nodeUp = false;
     private String pubkey = "";
     private boolean adoptChecked = false;
+
+    // Minima's provably-unspendable "RETURN FALSE" graveyard — burning a coin
+    // here destroys it forever (same address Atelier's StateNft.buryCommands uses).
+    private static final String GRAVEYARD = "0xABA005476D2B3CD7F251B9783E64C124C9670BB358695F04D91B2057BB64CB49";
 
     private Hosting.Profile hostEdit;
     private TextView claimBtn; private boolean claiming = false;
@@ -98,7 +103,7 @@ public class MainActivity extends AppCompatActivity {
         appbar.setBackgroundColor(Design.PAPER());
         chrome.addView(appbar, new LinearLayout.LayoutParams(-1, -2));
 
-        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
+        scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false);
         body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(16), dp(10), dp(16), dp(28));
         scroll.addView(body, new FrameLayout.LayoutParams(-1, -2));
@@ -121,6 +126,10 @@ public class MainActivity extends AppCompatActivity {
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
             appbar.setPadding(0, sys.top, 0, 0);
             navRow.setPadding(0, 0, 0, ime.bottom > 0 ? 0 : sys.bottom);
+            // When the keyboard is up, pad the scroll area by its height so the
+            // focused field always scrolls clear of the keyboard (never overlaid).
+            int kb = Math.max(0, ime.bottom - sys.bottom);
+            scroll.setPadding(0, 0, 0, kb);
             return insets;
         });
 
@@ -199,7 +208,7 @@ public class MainActivity extends AppCompatActivity {
     private JSONObject buildProfileJson() {
         JSONObject me = SalonStore.me(this), p = new JSONObject();
         putJson(p, "v", "1");
-        for (String k : new String[]{"handle","name","bio","about","avatar","banner","tokenid"})
+        for (String k : new String[]{"handle","name","bio","about","avatar","banner","tokenid","webvalidate"})
             putJson(p, k, me.optString(k, ""));
         putJson(p, "updated", Long.toString(System.currentTimeMillis() / 1000));
         try {
@@ -320,9 +329,9 @@ public class MainActivity extends AppCompatActivity {
                 body.addView(c, lp(0, 0, 0, 10));
                 // enrich the card from the hosted profile: real avatar, display name, bio
                 io.execute(() -> { JSONObject prof = httpGetJson(e.url); if (prof == null) return; runOnUiThread(() -> {
-                    String nm = prof.optString("name", ""), av = prof.optString("avatar", ""), bio = prof.optString("bio", "");
+                    String nm = prof.optString("name", ""), av = prof.optString("avatar", ""), bio = prof.optString("bio", ""), wv = prof.optString("webvalidate", "");
                     if (!nm.isEmpty()) nameTv.setText(nm);
-                    if (!av.isEmpty()) { avSlot.removeAllViews(); avSlot.addView(avatarView(av, e.handle, 48)); }
+                    avSlot.removeAllViews(); avSlot.addView(badgedAvatar(av, e.handle, e.tokenid, wv, 48));
                     if (!bio.isEmpty()) { bioTv.setText(bio); bioTv.setVisibility(View.VISIBLE); }
                 }); });
             }
@@ -378,7 +387,7 @@ public class MainActivity extends AppCompatActivity {
             headCard.addView(bn, new LinearLayout.LayoutParams(-1, dp(130)));
         }
         LinearLayout idrow = row();
-        idrow.addView(avatarView(p.optString("avatar"), p.optString("handle"), 66));
+        idrow.addView(badgedAvatar(p.optString("avatar"), p.optString("handle"), p.optString("tokenid"), p.optString("webvalidate"), 66));
         LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, 0, 0);
         col.addView(Design.text(this, p.optString("name"), 19, Design.INK(), Design.sansBold()));
         TextView h = Design.text(this, "@" + p.optString("handle"), 13, Design.ACCENT(), Design.mono());
@@ -391,9 +400,10 @@ public class MainActivity extends AppCompatActivity {
         headCard.addView(shieldSlot);
         String wv = p.optString("webvalidate", "");
         if (!wv.isEmpty()) {
+            final String host = urlHost(wv);
             Boolean st = WebValidate.status(p.optString("tokenid"));
-            if (Boolean.TRUE.equals(st)) shieldSlot.addView(verifiedBadge());
-            WebValidate.ensure(this, p.optString("tokenid"), wv, () -> { shieldSlot.removeAllViews(); if (Boolean.TRUE.equals(WebValidate.status(p.optString("tokenid")))) shieldSlot.addView(verifiedBadge()); });
+            if (Boolean.TRUE.equals(st)) shieldSlot.addView(verifiedBadge(host));
+            WebValidate.ensure(this, p.optString("tokenid"), wv, () -> { shieldSlot.removeAllViews(); if (Boolean.TRUE.equals(WebValidate.status(p.optString("tokenid")))) shieldSlot.addView(verifiedBadge(host)); });
         }
         body.addView(headCard, lp(0, 0, 0, 12));
 
@@ -452,7 +462,7 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================= EDIT hub ================= */
 
-    private EditText edAvatar, edBanner; private TextView profStatus;
+    private EditText edAvatar, edBanner, edWebvalidate; private TextView profStatus;
 
     private void renderEdit() {
         masthead("Edit page");
@@ -466,6 +476,13 @@ public class MainActivity extends AppCompatActivity {
         edBanner = field(who, "Banner URL", me.optString("banner"), false, "https://…");
         who.addView(btn("Upload banner", false, () -> pickMedia(PICK_BANNER, "image/*")), lph(42, 0, 4, 0, 2));
         body.addView(who, lp(0, 0, 0, 12));
+
+        // Verification — the anti-impersonation defence (handles aren't unique).
+        LinearLayout ver = card(); ver.addView(Design.lot(this, "Verify (prove it's you)"));
+        ver.addView(Design.note(this, "Handles aren't unique — anyone can call themselves @" + me.optString("handle") + ". To prove the real you, host a file on YOUR domain containing your token id, then paste its URL. A ✓ badge then shows on your card and page."), lp(0, 6, 0, 4));
+        copyRow(ver, "Your token id", me.optString("tokenid"));
+        edWebvalidate = field(ver, "Web-verification URL", me.optString("webvalidate"), false, "https://eurobuddha.com/salon.txt");
+        body.addView(ver, lp(0, 0, 0, 12));
 
         // Links
         LinearLayout linksCard = card(); linksCard.addView(Design.lot(this, "Links"));
@@ -515,6 +532,7 @@ public class MainActivity extends AppCompatActivity {
             SalonStore.put(this, "name", text(name)); SalonStore.put(this, "bio", text(bio));
             SalonStore.put(this, "about", text(about));
             SalonStore.put(this, "avatar", text(edAvatar)); SalonStore.put(this, "banner", text(edBanner));
+            SalonStore.put(this, "webvalidate", text(edWebvalidate));
             hostProfile(profStatus, () -> { publishSalon(profStatus); toast("Page saved & published."); go(Screen.HOME); });
         }), lph(52, 0, 8, 0, 0));
     }
@@ -1000,6 +1018,43 @@ public class MainActivity extends AppCompatActivity {
                 (ok, msg) -> runOnUiThread(() -> { if (status != null) status.setText(msg); else toast(msg); }));
     }
 
+    /** Burn any salon identity token that ISN'T your active one (e.g. a spare from
+     *  an old double-mint) — sent to the unspendable graveyard. Never touches the
+     *  token in SalonStore, so your live identity is always safe. */
+    private void burnSpares() {
+        if (!nodeUp) { toast("Need the node connected."); return; }
+        final String keep = SalonStore.get(this, "tokenid");
+        node.cmd("balance", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                final List<String> spares = new ArrayList<>();
+                JSONArray arr = j.optJSONArray("response");
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject t = arr.optJSONObject(i); if (t == null) continue;
+                    JSONObject meta = t.optJSONObject("token"); if (meta == null) continue;
+                    if ("1".equals(meta.optString("salon"))) { String tid = t.optString("tokenid"); if (!tid.equalsIgnoreCase(keep) && !spares.contains(tid)) spares.add(tid); }
+                }
+                runOnUiThread(() -> {
+                    if (spares.isEmpty()) { toast("No spare identity tokens — nothing to burn."); return; }
+                    StringBuilder sb = new StringBuilder();
+                    for (String s : spares) sb.append("• ").append(s).append("\n");
+                    new android.app.AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Burn " + spares.size() + " spare token(s)?")
+                            .setMessage("Your active identity " + Util.shorten(keep) + " is KEPT. These other salon tokens go to the unspendable graveyard — irreversible:\n\n" + sb)
+                            .setPositiveButton("Burn", (d, w) -> { for (String tid : spares) burnOne(tid); })
+                            .setNegativeButton("Cancel", null).show();
+                });
+            }
+            @Override public void onError(String m) { runOnUiThread(() -> toast("Balance failed: " + m)); }
+        });
+    }
+
+    private void burnOne(final String tid) {
+        node.cmd("send amount:1 tokenid:" + tid + " address:" + GRAVEYARD, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) { runOnUiThread(() -> toast(j.optBoolean("status", false) ? "Burn sent, mining: " + Util.shorten(tid) : "Burn failed: " + j.optString("error", ""))); }
+            @Override public void onError(String m) { runOnUiThread(() -> toast("Burn error: " + m)); }
+        });
+    }
+
     /* ================= SETTINGS + HOSTING (unchanged) ================= */
 
     private void renderSettings() {
@@ -1018,6 +1073,7 @@ public class MainActivity extends AppCompatActivity {
             copyRow(idc, "Handle", "@" + SalonStore.get(this, "handle"));
             copyRow(idc, "Token", SalonStore.get(this, "tokenid"));
             idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
+            idc.addView(btn("Burn spare identity token", false, this::burnSpares), lph(44, 0, 8, 0, 0));
             body.addView(idc, lp(0, 0, 0, 12));
         }
         LinearLayout about = card(); about.addView(Design.lot(this, "Colophon"));
@@ -1082,7 +1138,12 @@ public class MainActivity extends AppCompatActivity {
             case Hosting.TYPE_PINATA:
                 cfgSecret(card, cfg, "jwt", "Pinata JWT"); cfgField(card, cfg, "gateway", "Gateway", "https://gateway.pinata.cloud", false); break;
             case Hosting.TYPE_GITHUB:
-                cfgField(card, cfg, "owner", "Owner", "", false); cfgField(card, cfg, "repo", "Repo", "", false); cfgField(card, cfg, "branch", "Branch", "main", false); cfgSecret(card, cfg, "token", "Token (PAT)"); cfgField(card, cfg, "serve", "Serve via (raw/pages)", "raw", false); cfgField(card, cfg, "pagesPrefix", "Pages prefix", "", false); break;
+                card.addView(Design.note(this, "Set-up (once):\n"
+                        + "1. Make a PUBLIC repo on github.com (e.g. 'salon'). Owner = your username, Repo = its name.\n"
+                        + "2. Settings → Developer settings → Personal access tokens → Fine-grained → Generate. Give it Contents: Read and write on that repo. Paste it as Token (PAT).\n"
+                        + "3. Serve via 'raw' works instantly (raw.githubusercontent.com). For 'pages': in the repo Settings → Pages, enable Pages from your branch, then set Pages prefix to https://<owner>.github.io/<repo>/.\n"
+                        + "Branch 'main' is fine. Then Save & test."), lp(0, 6, 0, 4));
+                cfgField(card, cfg, "owner", "Owner (GitHub username)", "", false); cfgField(card, cfg, "repo", "Repo name", "salon", false); cfgField(card, cfg, "branch", "Branch", "main", false); cfgSecret(card, cfg, "token", "Token (PAT — Contents: read & write)"); cfgField(card, cfg, "serve", "Serve via (raw / pages)", "raw", false); cfgField(card, cfg, "pagesPrefix", "Pages prefix (only if serve=pages)", "https://you.github.io/salon/", false); break;
         }
         final TextView status = Design.note(this, ""); card.addView(status, lp(0, 8, 0, 0));
         LinearLayout btns = row();
@@ -1207,9 +1268,38 @@ public class MainActivity extends AppCompatActivity {
         r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.8f)); return r;
     }
 
-    private TextView verifiedBadge() {
-        int gold = 0xFF9A7B1F; TextView t = Design.text(this, "✓ WEB-VERIFIED", 9.5f, gold, Design.sansBold());
+    private TextView verifiedBadge(String host) {
+        int gold = 0xFF9A7B1F;
+        String label = host == null || host.isEmpty() ? "✓ WEB-VERIFIED" : "✓ VERIFIED · " + host.toUpperCase();
+        TextView t = Design.text(this, label, 9.5f, gold, Design.sansBold());
         t.setLetterSpacing(0.1f); t.setPadding(dp(8), dp(5), dp(8), dp(6)); t.setBackground(Design.ruled(this, Design.CARD(), gold, 2)); return t;
+    }
+
+    private String urlHost(String url) { try { return new java.net.URL(url.trim()).getHost(); } catch (Exception e) { return ""; } }
+
+    /** Atelier/NFTwallet parity: wrap the avatar so a web-validation plaque
+     *  (Identicon.checkBadge) sits bottom-right when the token's webvalidate doc
+     *  proves the tokenid — the over-image mark that flags the real, verified
+     *  account (handles aren't unique, so this is what distinguishes fakes). */
+    private FrameLayout badgedAvatar(String avatarUrl, String label, final String tokenid, String webvalidate, int sizeDp) {
+        FrameLayout f = new FrameLayout(this);
+        View av = avatarView(avatarUrl, label, sizeDp);
+        f.addView(av, new FrameLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
+        final int bs = dp(Math.max(15, sizeDp / 3));
+        final Runnable paint = () -> {
+            if (f.getChildCount() > 1) f.removeViewAt(1);
+            if (Boolean.TRUE.equals(WebValidate.status(tokenid))) {
+                ImageView badge = new ImageView(this);
+                FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(bs, bs, Gravity.BOTTOM | Gravity.END);
+                blp.setMargins(0, 0, dp(2), dp(2));
+                badge.setLayoutParams(blp); badge.setImageBitmap(Identicon.checkBadge(bs));
+                f.addView(badge);
+            }
+        };
+        paint.run();
+        if (tokenid != null && !tokenid.isEmpty() && webvalidate != null && !webvalidate.isEmpty())
+            WebValidate.ensure(this, tokenid, webvalidate, paint);
+        return f;
     }
 
     private EditText field(LinearLayout parent, String label, String value, boolean secret, String hint) {
