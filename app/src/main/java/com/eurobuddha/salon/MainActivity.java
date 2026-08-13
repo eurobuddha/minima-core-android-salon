@@ -156,8 +156,25 @@ public class MainActivity extends AppCompatActivity {
             reannouncedThisSession = true;
             SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
                     SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
+            touchOwnRelay();   // refresh the 7-day TTL on any relay-hosted content
         }
     }
+
+    /** GET-touch the owner's own relay blobs so their 7-day TTL resets each session. */
+    private void touchOwnRelay() {
+        final String pu = SalonStore.get(this, "profileUrl");
+        if (!RelayResolver.isRelayRef(pu)) return;
+        io.execute(() -> {
+            try {
+                JSONObject p = RelayResolver.resolveJson(pu);   // GET refreshes profile.json chunks
+                touchRef(p.optString("avatar", "")); touchRef(p.optString("banner", ""));
+                touchArr(p.optJSONArray("gallery"), "url");
+                touchArr(p.optJSONArray("posts"), "media");
+            } catch (Exception ignored) {}
+        });
+    }
+    private void touchRef(String u) { if (RelayResolver.isRelayRef(u)) RelayResolver.touch(u); }
+    private void touchArr(JSONArray a, String key) { if (a == null) return; for (int i = 0; i < a.length(); i++) { JSONObject o = a.optJSONObject(i); if (o != null) touchRef(o.optString(key, "")); } }
 
     @Override protected void onDestroy() { super.onDestroy(); io.shutdownNow(); stopAudio(); }
 
@@ -239,7 +256,9 @@ public class MainActivity extends AppCompatActivity {
             try {
                 Hosting.Uploader up = Hosting.forProfile(def);
                 String url = up.putFile(profile.toString().getBytes("UTF-8"), handle + "/profile.json", "application/json");
-                try { up.putFile(SALON_HTML.getBytes("UTF-8"), handle + "/index.html", "text/html"); } catch (Exception ignore) {}
+                // The encrypted relay isn't a web host — skip the browser renderer there.
+                if (!Hosting.TYPE_RELAY.equals(def.type()))
+                    try { up.putFile(SALON_HTML.getBytes("UTF-8"), handle + "/index.html", "text/html"); } catch (Exception ignore) {}
                 Hosting.verifyUrl(url, def);
                 runOnUiThread(() -> {
                     SalonStore.put(this, "profileUrl", url);
@@ -675,10 +694,21 @@ public class MainActivity extends AppCompatActivity {
 
     private void openVideo(String url) {
         if (url == null || url.isEmpty()) return;
+        if (RelayResolver.isRelayRef(url)) {                 // decrypt to a cache file first
+            toast("Decrypting video…");
+            io.execute(() -> { try { java.io.File f = RelayResolver.resolveToTempFile(this, url);
+                runOnUiThread(() -> playVideoUri(Uri.fromFile(f))); }
+                catch (Exception e) { runOnUiThread(() -> toast("Couldn't load video: " + e.getMessage())); } });
+            return;
+        }
+        playVideoUri(Uri.parse(url));
+    }
+
+    private void playVideoUri(Uri uri) {
         Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
         VideoView vv = new VideoView(this);
         MediaController mc = new MediaController(this); mc.setAnchorView(vv);
-        vv.setMediaController(mc); vv.setVideoURI(Uri.parse(url));
+        vv.setMediaController(mc); vv.setVideoURI(uri);
         FrameLayout fl = new FrameLayout(this); fl.setBackgroundColor(0xFF000000);
         fl.addView(vv, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         d.setContentView(fl); d.show();
@@ -855,12 +885,24 @@ public class MainActivity extends AppCompatActivity {
      *  controlled from the docked mini-player until you hit ✕. */
     private void playTrack(String url, String title) {
         if (url == null || url.isEmpty()) return;
+        if (RelayResolver.isRelayRef(url)) {                 // decrypt to a cache file first
+            stopAudio(); miniTitle.setText(title); miniTime.setText("decrypting…"); miniBar.setProgress(0);
+            miniPlayer.setVisibility(View.VISIBLE);
+            io.execute(() -> { try { java.io.File f = RelayResolver.resolveToTempFile(this, url);
+                runOnUiThread(() -> playTrackSource(f.getAbsolutePath(), title)); }
+                catch (Exception e) { runOnUiThread(() -> { toast("Couldn't load track: " + e.getMessage()); stopAudio(); }); } });
+            return;
+        }
+        playTrackSource(url, title);
+    }
+
+    private void playTrackSource(String source, String title) {
         stopAudio();
         final MediaPlayer mp = new MediaPlayer(); audio = mp;
         miniTitle.setText(title); miniTime.setText("0:00"); miniBar.setProgress(0);
         miniPlayer.setVisibility(View.VISIBLE); updateMiniPlay();
         try {
-            mp.setDataSource(url);
+            mp.setDataSource(source);
             mp.setOnPreparedListener(x -> { mp.start(); updateMiniPlay(); startTicker(); });
             mp.setOnCompletionListener(x -> { miniBar.setProgress(1000); updateMiniPlay(); });
             mp.setOnErrorListener((m, w, e) -> { toast("Playback error"); stopAudio(); return true; });
@@ -954,7 +996,8 @@ public class MainActivity extends AppCompatActivity {
                 JSONObject profile = buildProfileJson();
                 Hosting.Uploader up = Hosting.forProfile(def);
                 String profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), h + "/profile.json", "application/json");
-                try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
+                if (!Hosting.TYPE_RELAY.equals(def.type()))
+                    try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
                 Hosting.verifyUrl(profileUrl, def);
                 runOnUiThread(() -> { SalonStore.put(this, "profileUrl", profileUrl); status.setText("Page live. Checking identity…"); adoptOrMint(h, n, b, profileUrl, status); });
             } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> { promptTrustHostKey(def, hk.fingerprint, status); claimFailed(); }); }
@@ -1110,8 +1153,8 @@ public class MainActivity extends AppCompatActivity {
         body.addView(btn("Add destination", true, () -> { hostEdit = null; go(Screen.HOSTING_EDIT); }), lph(52, 0, 4, 0, 8));
     }
 
-    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB };
-    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub" };
+    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_RELAY };
+    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Encrypted relay" };
 
     private void renderHostingEdit() {
         masthead(hostEdit == null ? "Add destination" : "Edit destination");
@@ -1158,6 +1201,10 @@ public class MainActivity extends AppCompatActivity {
                         + "3. Serve via 'raw' works instantly (raw.githubusercontent.com). For 'pages': in the repo Settings → Pages, enable Pages from your branch, then set Pages prefix to https://<owner>.github.io/<repo>/.\n"
                         + "Branch 'main' is fine. Then Save & test."), lp(0, 6, 0, 4));
                 cfgField(card, cfg, "owner", "Owner (GitHub username)", "", false); cfgField(card, cfg, "repo", "Repo name", "salon", false); cfgField(card, cfg, "branch", "Branch", "main", false); cfgSecret(card, cfg, "token", "Token (PAT — Contents: read & write)"); cfgField(card, cfg, "serve", "Serve via (raw / pages)", "raw", false); cfgField(card, cfg, "pagesPrefix", "Pages prefix (only if serve=pages)", "https://you.github.io/salon/", false); break;
+            case Hosting.TYPE_RELAY:
+                cfgField(card, cfg, "relayUrl", "Relay URL", RelayUploader.DEFAULT_RELAY, false);
+                card.addView(Design.note(this, "Publish with NO server of your own: your phone encrypts your page + media (libsodium) and uploads only the CIPHERTEXT to this relay's blob store — the relay can never read it. The decryption key travels in your public pointer, so any Salon viewer can see your page.\n\nTrade-offs: viewable in the Salon app only (a web browser can't decrypt it — SFTP/IPFS keep the browser view); and content expires ~7 days after it's last opened/viewed, so open the app now and then to keep it alive."), lp(0, 6, 0, 2));
+                break;
         }
         final TextView status = Design.note(this, ""); card.addView(status, lp(0, 8, 0, 0));
         LinearLayout btns = row();
@@ -1214,6 +1261,9 @@ public class MainActivity extends AppCompatActivity {
     /* ================= HTTP ================= */
 
     private JSONObject httpGetJson(String url) {
+        if (RelayResolver.isRelayRef(url)) {
+            try { return RelayResolver.resolveJson(url); } catch (Exception e) { return null; }
+        }
         HttpURLConnection c = null;
         try {
             if (url == null || !url.startsWith("http")) return null;

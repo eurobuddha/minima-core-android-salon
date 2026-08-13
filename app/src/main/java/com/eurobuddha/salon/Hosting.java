@@ -27,6 +27,7 @@ final class Hosting {
     static final String TYPE_KUBO = "kubo";
     static final String TYPE_PINATA = "pinata";
     static final String TYPE_GITHUB = "github";
+    static final String TYPE_RELAY = "relay";
 
     static class Profile {
         JSONObject j;
@@ -203,6 +204,7 @@ final class Hosting {
             case TYPE_KUBO:   return new IpfsUploader(p);
             case TYPE_PINATA: return new PinataUploader(p);
             case TYPE_GITHUB: return new GithubUploader(p);
+            case TYPE_RELAY:  return new RelayUploader(p);
             default: throw new HostingException("Unknown destination type: " + p.type());
         }
     }
@@ -239,6 +241,11 @@ final class Hosting {
      *  hosts the user explicitly configured in the profile (a LAN kubo
      *  gateway is legitimate for its owner). */
     static void verifyUrl(String url, Profile p) throws HostingException {
+        // A relay1: ref isn't an http URL — verify by fetching+decrypting it back.
+        if (RelayResolver.isRelayRef(url)) {
+            try { RelayResolver.resolveBytes(url); return; }
+            catch (Exception e) { throw new HostingException("relay content not readable back: " + e.getMessage()); }
+        }
         int attempts = p != null && TYPE_GITHUB.equals(p.type()) ? 3 : 1;
         HostingException last = null;
         for (int a = 0; a < attempts; a++) {

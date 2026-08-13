@@ -55,7 +55,9 @@ public final class ImageLoader {
 
     static Bitmap decode(android.content.Context ctx, String url, int reqPx) {
         try {
-            byte[] bytes = url.startsWith("data:") ? dataUriBytes(url) : fetchCached(ctx, url);
+            byte[] bytes = RelayResolver.isRelayRef(url) ? relayBytes(url)
+                    : url.startsWith("data:") ? dataUriBytes(url)
+                    : fetchCached(ctx, url);
             if (bytes == null || bytes.length == 0) return null;
             if (looksLikeSvg(bytes, url)) return renderSvg(bytes, reqPx);
             BitmapFactory.Options bounds = new BitmapFactory.Options();
@@ -185,6 +187,11 @@ public final class ImageLoader {
             return true;
         }
         return false;
+    }
+
+    /** Encrypted-relay image: fetch ciphertext chunks + decrypt (off the main thread). */
+    private static byte[] relayBytes(String ref) {
+        try { return RelayResolver.resolveBytes(ref).bytes; } catch (Exception e) { return null; }
     }
 
     private static byte[] dataUriBytes(String dataUri) {

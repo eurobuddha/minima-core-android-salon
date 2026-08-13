@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.salon"
         minSdk 28
         targetSdk 35
-        versionCode 9
-        versionName "0.5.0"
+        versionCode 10
+        versionName "0.6.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -69,6 +69,11 @@ dependencies {
     // SFTP for the Hosting feature — maintained JSch fork (modern KEX for
     // current OpenSSH; stock jcraft 0.1.55 cannot connect to Debian 12+)
     implementation 'com.github.mwiede:jsch:0.2.21'
+
+    // libsodium for the Encrypted-relay hosting backend (crypto_secretbox) —
+    // same versions the comms code (support/freezepeach) uses.
+    implementation 'com.goterl:lazysodium-android:5.1.0@aar'
+    implementation 'net.java.dev.jna:jna:5.13.0@aar'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
 }
