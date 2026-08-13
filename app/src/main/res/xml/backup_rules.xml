@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Hosting credentials are Keystore-wrapped; the key never leaves the
+         device, so restoring the ciphertext onto a new device would be
+         useless anyway. Exclude it so nothing sensitive travels in a backup. -->
+    <exclude domain="sharedpref" path="statenft_hosting.xml"/>
+</full-backup-content>

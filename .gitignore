@@ -1,0 +1,13 @@
+# Android / Gradle build output
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# graphify per-repo output (rebuilt by the post-commit hook)
+graphify-out/

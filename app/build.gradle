@@ -1,0 +1,74 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+android {
+    namespace 'com.eurobuddha.salon'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.eurobuddha.salon"
+        minSdk 28
+        targetSdk 35
+        versionCode 3
+        versionName "0.1.2"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        // Minima family release key. Credentials come from ~/.gradle/gradle.properties
+        // (outside every repo). On a machine without those props this stays empty and
+        // release falls back to debug signing.
+        release {
+            def ksFile = project.findProperty('MINIMA_FAMILY_RELEASE_STORE_FILE')
+            if (ksFile != null) {
+                storeFile file(ksFile)
+                storePassword project.findProperty('MINIMA_FAMILY_RELEASE_STORE_PASSWORD')
+                keyAlias project.findProperty('MINIMA_FAMILY_RELEASE_KEY_ALIAS')
+                keyPassword project.findProperty('MINIMA_FAMILY_RELEASE_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // HELD at debug signing for now (new app, no existing users) — flip to
+            // signingConfigs.release when the fleet key is set on the build machine.
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    packaging {
+        // jsch and jspecify both ship this OSGi metadata; neither is needed at runtime
+        resources {
+            excludes += ['META-INF/versions/9/OSGI-INF/MANIFEST.MF', 'META-INF/DEPENDENCIES']
+        }
+    }
+}
+
+dependencies {
+    implementation libs.appcompat
+    implementation libs.material
+    implementation libs.activity
+    implementation libs.constraintlayout
+    implementation files('libs/minimaapi.aar')
+    implementation 'com.caverock:androidsvg-aar:1.4'
+
+    // SFTP for the Hosting feature — maintained JSch fork (modern KEX for
+    // current OpenSSH; stock jcraft 0.1.55 cannot connect to Debian 12+)
+    implementation 'com.github.mwiede:jsch:0.2.21'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}
