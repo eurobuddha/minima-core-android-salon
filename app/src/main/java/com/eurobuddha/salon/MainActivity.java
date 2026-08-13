@@ -1134,7 +1134,12 @@ public class MainActivity extends AppCompatActivity {
             case Hosting.TYPE_WEBDAV:
                 cfgField(card, cfg, "endpoint", "Write endpoint", "https://dav.example.com/files/", false); cfgField(card, cfg, "user", "User", "", false); cfgSecret(card, cfg, "password", "Password"); cfgField(card, cfg, "urlPrefix", "Public URL prefix", "https://example.com/files/", false); break;
             case Hosting.TYPE_KUBO:
-                cfgField(card, cfg, "apiUrl", "kubo API", "http://127.0.0.1:5001", false); cfgField(card, cfg, "gateway", "Public gateway", "https://ipfs.eurobuddha.com", false); break;
+                cfgField(card, cfg, "apiUrl", "kubo RPC API", "https://api-ipfs.eurobuddha.com", false);
+                cfgField(card, cfg, "user", "API user (HTTP Basic — optional)", "ipfs", false);
+                cfgSecret(card, cfg, "password", "API password (HTTP Basic — optional)");
+                cfgField(card, cfg, "gateway", "Public gateway", "https://ipfs.eurobuddha.com", false);
+                card.addView(Design.note(this, "If your kubo RPC sits behind HTTP Basic auth (reverse proxy), put the user + password here — the app sends a proper Authorization header. Embedding user:pass@ in the API URL does NOT work on Android (the header is dropped → 401)."), lp(0, 6, 0, 2));
+                break;
             case Hosting.TYPE_PINATA:
                 cfgSecret(card, cfg, "jwt", "Pinata JWT"); cfgField(card, cfg, "gateway", "Gateway", "https://gateway.pinata.cloud", false); break;
             case Hosting.TYPE_GITHUB:

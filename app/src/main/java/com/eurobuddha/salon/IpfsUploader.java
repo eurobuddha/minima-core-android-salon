@@ -17,8 +17,44 @@ final class IpfsUploader implements Hosting.Uploader, Hosting.DirUploader {
 
     private String addUrl() {
         boolean pin = profile.cfg().optBoolean("pin", true);
-        return Hosting.trimSlash(profile.cfgStr("apiUrl"))
+        return cleanApiUrl()
                 + "/api/v0/add?pin=" + pin + "&cid-version=1&progress=false";
+    }
+
+    /** The API URL with any {@code user:pass@} userinfo stripped — Android's HTTP
+     *  stack ignores userinfo for auth, so we must connect to the plain host and
+     *  carry the credentials in an Authorization header instead. */
+    private String cleanApiUrl() {
+        String u = Hosting.trimSlash(profile.cfgStr("apiUrl"));
+        try {
+            java.net.URI uri = new java.net.URI(u);
+            if (uri.getUserInfo() != null) {
+                java.net.URI clean = new java.net.URI(uri.getScheme(), null, uri.getHost(), uri.getPort(),
+                        uri.getPath(), uri.getQuery(), uri.getFragment());
+                return Hosting.trimSlash(clean.toString());
+            }
+        } catch (Exception ignore) {}
+        return u;
+    }
+
+    /** HTTP Basic header from explicit user/password config fields, or (fallback)
+     *  from {@code user:pass@} embedded in the apiUrl. Null when no credentials. */
+    private String basicAuthHeader() {
+        String user = profile.cfg().optString("user", "");
+        String pass = Crypt.decrypt(profile.cfg().optString("password", ""));
+        if (user.isEmpty()) {
+            try {
+                String ui = new java.net.URI(Hosting.trimSlash(profile.cfgStr("apiUrl"))).getUserInfo();
+                if (ui != null) {
+                    int c = ui.indexOf(':');
+                    if (c >= 0) { user = ui.substring(0, c); pass = ui.substring(c + 1); }
+                    else { user = ui; pass = ""; }
+                }
+            } catch (Exception ignore) {}
+        }
+        if (user.isEmpty()) return null;
+        byte[] raw = (user + ":" + pass).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return "Basic " + android.util.Base64.encodeToString(raw, android.util.Base64.NO_WRAP);
     }
 
     @Override public String putFile(byte[] bytes, String relPath, String mime) throws Hosting.HostingException {
@@ -52,6 +88,8 @@ final class IpfsUploader implements Hosting.Uploader, Hosting.DirUploader {
             HttpURLConnection con = Hosting.open(addUrl(), "POST");
             con.setDoOutput(true);
             con.setChunkedStreamingMode(0);
+            String auth = basicAuthHeader();
+            if (auth != null) con.setRequestProperty("Authorization", auth);
             con.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
             try (java.io.OutputStream out = con.getOutputStream()) {
                 for (Hosting.Entry e : parts) {
@@ -75,7 +113,7 @@ final class IpfsUploader implements Hosting.Uploader, Hosting.DirUploader {
         } catch (Hosting.HostingException he) {
             throw he;
         } catch (Exception e) {
-            throw new Hosting.HostingException("kubo not reachable at " + profile.cfgStr("apiUrl")
+            throw new Hosting.HostingException("kubo not reachable at " + cleanApiUrl()
                     + " — " + e.getClass().getSimpleName());
         }
     }
