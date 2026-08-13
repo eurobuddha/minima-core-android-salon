@@ -22,7 +22,27 @@ No Maxima, no platform, no central server. Everything is MinimaCore-native.
 - **My Salon** page + **Edit** (name / bio / avatar / banner, images picked → compressed →
   uploaded via SFTP), re-hosting `profile.json` to a stable URL.
 
-Roadmap: milestone 2 — Discover (on-chain registry), follows, the pull Feed, and posts.
+**Milestone 2 (v0.2.x): a real, media-rich, discoverable social space.**
+- **Rich page** — `profile.json` now carries `about`, `links[]`, `gallery[]`, and `posts[]`.
+  Editors for each (add / remove) live under **Edit my page**; every save re-hosts the file
+  (no chain txn). Nothing is truncated — tokenid is tap-to-copy, the profile URL is a real link.
+- **Photos, video and music** — pick an image / video / audio file → it uploads to your own
+  storage (`<handle>/media/…`; images compressed, A/V size-capped) → shows in your gallery
+  and posts, with **in-app playback** (fullscreen image zoom, `VideoView`, streaming audio).
+- **The town square** — a shared on-chain address `SALON_ADDRESS = 0x53414C4F4E`. **Publish**
+  sends a dust coin whose state points at your `{tokenid, url, handle}`; **Discover** reads
+  every pointer off that address on any node (deduped by tokenid, latest-wins) — no server,
+  no directory company.
+- **View anyone** — tap a Discover card → the app fetches that profile's `profile.json` and
+  renders it with the same page renderer used for your own.
+- **Follows + Feed** — follow a *token* (device-side list); the **Feed** pull-fetches each
+  followed profile's posts, merges them by timestamp, and is the default landing once you
+  follow someone.
+- **Public web page** — a static `web/salon.html` renderer is uploaded beside `profile.json`,
+  so `http://<server>/salon/<handle>/` shows a real page to anyone with the link, in a browser.
+
+Later milestones: DMs (Minima Mail), commerce (tip jar / paid content / shop), replies /
+reactions, and registry re-announce hardening (coins can be pruned).
 
 ## Build
 
@@ -48,8 +68,15 @@ infrastructure verbatim (package-renamed to `com.eurobuddha.salon`):
 - `Design` (Katalog: paper / ink / vermilion, block shadows, lot numbers),
   `ImageLoader` / `Identicon` / `WebValidate` / `ImageTools` / `SvgSanitizer` / `Util`.
 
-Salon-specific: `MainActivity` (screen framework, onboard, hosting editor, profile edit,
-My Salon), `SalonStore` (local identity cache).
+Salon-specific:
+- `MainActivity` — screen framework (Feed / Discover / My Salon / View / Edit / Settings /
+  Hosting), onboard + claim, the one `renderProfilePage` renderer, media pick / upload / play.
+- `SalonRegistry` — the town square: `announce` (dust coin + state pointer) and `list`
+  (`coins address:0x53414C4F4E` → parse / dedupe).
+- `SalonStore` — local identity cache + rich-content draft (`links` / `gallery` / `posts`)
+  + the `follows` set.
+- `web/salon.html` — the public browser renderer (kept in sync with the inlined copy the app
+  uploads).
 
 Licensed the same as the rest of the Minima build family. Experimental — it moves real
 tokens and posts to a live chain; test small.

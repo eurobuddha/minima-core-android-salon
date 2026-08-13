@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>The Salon</title>
+  <!--
+    The Salon — public page renderer. Uploaded verbatim beside profile.json to
+    <handle>/index.html so http://<server>/salon/<handle>/ shows a real page to
+    anyone with the link, while the native app renders the same profile.json
+    natively. Same-origin fetch, no CORS, no framework, no build step. Keep this
+    in sync with SALON_HTML in MainActivity.java (that inlined copy is what the
+    app actually uploads; this file is the readable source of truth).
+  -->
+  <style>
+    body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:#F2F1EC; color:#141310 }
+    .w { max-width:680px; margin:0 auto; padding:0 16px 64px }
+    .ban { width:100%; height:180px; object-fit:cover; display:block }
+    .av { width:88px; height:88px; border-radius:8px; object-fit:cover; border:2px solid #141310; margin-top:-30px; background:#ddd }
+    h1 { font-size:26px; margin:10px 0 2px }
+    .h { color:#E63312; font-family:monospace }
+    .bio { font-size:16px }
+    .k { font:700 11px/1 monospace; letter-spacing:.15em; text-transform:uppercase; color:#6B6A64; margin:26px 0 8px; border-bottom:2px solid #141310; padding-bottom:6px }
+    a.l { display:block; padding:11px 13px; border:1.5px solid #141310; background:#FCFBF7; margin:8px 0; color:#141310; text-decoration:none; box-shadow:3px 3px 0 #141310 }
+    .g { display:grid; grid-template-columns:repeat(3,1fr); gap:8px }
+    .g > * { aspect-ratio:1; width:100%; object-fit:cover; border:1.5px solid #141310; background:#000 }
+    .post { border:1.5px solid #141310; background:#FCFBF7; padding:12px 14px; margin:10px 0; box-shadow:3px 3px 0 #141310 }
+    video, audio { width:100% }
+    img.pm { width:100%; border:1.5px solid #141310; margin-top:8px }
+  </style>
+</head>
+<body>
+  <div class="w"><div id="b"></div></div>
+  <script>
+    fetch('./profile.json').then(function (r) { return r.json(); }).then(function (p) {
+      var b = document.getElementById('b'), h = '';
+      if (p.banner) h += "<img class=ban src='" + p.banner + "'>";
+      h += "<img class=av src='" + (p.avatar || '') + "'>";
+      h += '<h1>' + (p.name || '') + '</h1>';
+      h += "<div class=h>@" + (p.handle || '') + '</div>';
+      if (p.bio) h += '<div class=bio>' + p.bio + '</div>';
+      if (p.about) h += '<div class=k>About</div><div>' + p.about + '</div>';
+      if (p.links && p.links.length) {
+        h += '<div class=k>Links</div>';
+        p.links.forEach(function (l) { h += "<a class=l href='" + l.url + "'>" + (l.label || l.url) + '</a>'; });
+      }
+      if (p.gallery && p.gallery.length) {
+        h += '<div class=k>Gallery</div><div class=g>';
+        p.gallery.forEach(function (m) {
+          if (m.type == 'video') h += "<video src='" + m.url + "' controls></video>";
+          else if (m.type == 'audio') h += "<div style='display:flex;align-items:center;justify-content:center'>&#9835;</div>";
+          else h += "<img src='" + m.url + "'>";
+        });
+        h += '</div>';
+        p.gallery.forEach(function (m) { if (m.type == 'audio') h += "<audio src='" + m.url + "' controls></audio>"; });
+      }
+      if (p.posts && p.posts.length) {
+        h += '<div class=k>Posts</div>';
+        p.posts.slice().reverse().forEach(function (t) {
+          h += '<div class=post>' + (t.text || '');
+          if (t.media) {
+            if (t.type == 'video') h += "<video src='" + t.media + "' controls></video>";
+            else if (t.type == 'audio') h += "<audio src='" + t.media + "' controls></audio>";
+            else h += "<img class=pm src='" + t.media + "'>";
+          }
+          h += '</div>';
+        });
+      }
+      b.innerHTML = h;
+    }).catch(function () { document.getElementById('b').innerHTML = '<p>Profile not found.</p>'; });
+  </script>
+</body>
+</html>

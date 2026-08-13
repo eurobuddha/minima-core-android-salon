@@ -1,13 +1,15 @@
 package com.eurobuddha.salon;
 
 import android.app.Activity;
+import android.app.Dialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Typeface;
+import android.media.MediaPlayer;
 import android.net.Uri;
-import android.os.Bundle;
-import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -16,9 +18,12 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.MediaController;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.VideoView;
+import android.os.Bundle;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
@@ -32,22 +37,28 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The Salon — native Minima Core companion. Identity = a 1/1 signed token you own;
- * your page = a profile.json you host on your OWN storage (SFTP / WebDAV / IPFS /
- * GitHub) and edit freely. Milestone 1: hosting settings, claim + mint identity,
- * create/host/view your Salon page.
+ * The Salon — a decentralised, media-rich social page. Your identity is a 1/1
+ * signed token; your page is a profile.json (with images, video and music, all
+ * hosted URLs) on your own server, edited freely. A shared on-chain address is
+ * the town square: post a pointer, browse everyone, follow, and pull a feed.
  */
 public class MainActivity extends AppCompatActivity {
 
     private NodeApi node;
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService io = Executors.newFixedThreadPool(3);
+    private MediaPlayer audio;
 
-    private enum Screen { HOME, SETTINGS, HOSTING, HOSTING_EDIT, ONBOARD, PROFILE_EDIT }
+    private enum Screen { FEED, DISCOVER, HOME, VIEW, EDIT, ONBOARD, SETTINGS, HOSTING, HOSTING_EDIT }
     private Screen screen = Screen.HOME;
 
     private LinearLayout appbar, navRow, body;
@@ -55,11 +66,12 @@ public class MainActivity extends AppCompatActivity {
     private TextView nodeChip;
     private boolean nodeUp = false;
     private String pubkey = "";
+    private boolean adoptChecked = false;
 
-    private Hosting.Profile hostEdit;     // profile being edited
-    private int insetTop = 0, insetBottom = 0;
-    private TextView claimBtn;            // the Claim button (disabled while minting)
-    private boolean claiming = false;     // hard guard: one claim at a time, ever
+    private Hosting.Profile hostEdit;
+    private TextView claimBtn; private boolean claiming = false;
+    private JSONObject viewProfile;        // profile being viewed (someone else)
+    private SalonRegistry.Entry viewEntry; // registry entry for the viewed profile
 
     /* ---------------- lifecycle ---------------- */
 
@@ -69,25 +81,20 @@ public class MainActivity extends AppCompatActivity {
 
         rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(Design.PAPER());
-
         LinearLayout chrome = new LinearLayout(this);
         chrome.setOrientation(LinearLayout.VERTICAL);
 
-        appbar = new LinearLayout(this);
-        appbar.setOrientation(LinearLayout.VERTICAL);
+        appbar = new LinearLayout(this); appbar.setOrientation(LinearLayout.VERTICAL);
         appbar.setBackgroundColor(Design.PAPER());
         chrome.addView(appbar, new LinearLayout.LayoutParams(-1, -2));
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
+        body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(16), dp(10), dp(16), dp(28));
         scroll.addView(body, new FrameLayout.LayoutParams(-1, -2));
         chrome.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        navRow = new LinearLayout(this);
-        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        navRow = new LinearLayout(this); navRow.setOrientation(LinearLayout.VERTICAL);
         navRow.setBackgroundColor(Design.PAPER());
         chrome.addView(navRow, new LinearLayout.LayoutParams(-1, -2));
 
@@ -95,99 +102,50 @@ public class MainActivity extends AppCompatActivity {
         setContentView(rootFrame);
 
         WindowInsetsControllerCompat wic = new WindowInsetsControllerCompat(getWindow(), rootFrame);
-        wic.setAppearanceLightStatusBars(true);
-        wic.setAppearanceLightNavigationBars(true);
+        wic.setAppearanceLightStatusBars(true); wic.setAppearanceLightNavigationBars(true);
         ViewCompat.setOnApplyWindowInsetsListener(rootFrame, (v, insets) -> {
-            Insets sys = insets.getInsets(WindowInsetsCompat.Type.systemBars()
-                    | WindowInsetsCompat.Type.displayCutout());
+            Insets sys = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            insetTop = sys.top;
-            insetBottom = Math.max(sys.bottom, ime.bottom);
-            appbar.setPadding(0, insetTop, 0, 0);
+            appbar.setPadding(0, sys.top, 0, 0);
             navRow.setPadding(0, 0, 0, ime.bottom > 0 ? 0 : sys.bottom);
             return insets;
         });
 
         node = new NodeApi(this, enabled -> runOnUiThread(() -> { nodeUp = enabled; onNode(); }));
-        buildNav();
+        if (SalonStore.hasIdentity(this)) screen = Screen.HOME;
         render();
     }
 
-    private boolean adoptChecked = false;
-
     private void onNode() {
-        paintNodeChip();
+        if (nodeChip != null) nodeChip.setText(nodeUp ? "connected" : "no node");
         if (nodeUp && pubkey.isEmpty()) fetchPubkey();
-        // Reinstall-proof + resolves a claim whose token confirmed after we stopped
-        // polling: if the wallet holds a salon token but we have no local identity,
-        // adopt it — never a fresh mint.
         if (nodeUp && !adoptChecked && !claiming && !SalonStore.hasIdentity(this)) {
             adoptChecked = true;
             node.cmd("balance", new NodeApi.Cb() {
-                @Override public void onResult(JSONObject json) {
-                    JSONObject tok = findAnySalonToken(json);
-                    if (tok != null) runOnUiThread(() -> adoptFromToken(tok));
-                }
+                @Override public void onResult(JSONObject j) { JSONObject t = findAnySalonToken(j); if (t != null) runOnUiThread(() -> adoptFromToken(t)); }
                 @Override public void onError(String m) {}
             });
         }
     }
 
-    /** First salon token this wallet holds (the balance row), or null.
-     *  handle == null matches ANY salon token. */
-    private JSONObject findSalonEntry(JSONObject balanceJson, String handle) {
-        try {
-            JSONArray arr = balanceJson.optJSONArray("response");
-            if (arr == null) return null;
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject t = arr.optJSONObject(i);
-                if (t == null) continue;
-                JSONObject meta = t.optJSONObject("token");   // metadata object, directly
-                if (meta == null) continue;                   // Minima's token is a plain string
-                if ("1".equals(meta.optString("salon"))
-                        && (handle == null || handle.equals(meta.optString("handle")))) return t;
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
+    @Override protected void onDestroy() { super.onDestroy(); io.shutdownNow(); stopAudio(); }
 
-    private JSONObject findAnySalonToken(JSONObject balanceJson) { return findSalonEntry(balanceJson, null); }
-
-    /** Store identity from an on-chain salon token's metadata and open My Salon. */
-    private void adoptFromToken(JSONObject tokenRow) {
-        try {
-            JSONObject meta = tokenRow.optJSONObject("token");
-            SalonStore.put(this, "tokenid", tokenRow.optString("tokenid"));
-            SalonStore.put(this, "handle", meta.optString("handle"));
-            SalonStore.put(this, "name", meta.optString("name"));
-            SalonStore.put(this, "bio", meta.optString("bio"));
-            SalonStore.put(this, "profileUrl", meta.optString("url"));
-            claiming = false;
-            if (screen == Screen.HOME || screen == Screen.ONBOARD) go(Screen.HOME);
-        } catch (Exception ignored) {}
-    }
-
-    @Override protected void onDestroy() { super.onDestroy(); io.shutdownNow(); }
-
-    /* ---------------- chrome ---------------- */
+    /* ---------------- chrome + nav ---------------- */
 
     private void buildNav() {
         navRow.removeAllViews();
         navRow.addView(Design.rule(this, 2), new LinearLayout.LayoutParams(-1, dp(2)));
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.addView(navTab("My Salon", screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.PROFILE_EDIT,
-                () -> go(Screen.HOME)), weight1());
-        tabs.addView(navTab("Settings", screen == Screen.SETTINGS || screen == Screen.HOSTING || screen == Screen.HOSTING_EDIT,
-                () -> go(Screen.SETTINGS)), weight1());
+        LinearLayout tabs = new LinearLayout(this); tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.addView(navTab("Feed", screen == Screen.FEED, () -> go(Screen.FEED)), weight1());
+        tabs.addView(navTab("Discover", screen == Screen.DISCOVER || screen == Screen.VIEW, () -> go(Screen.DISCOVER)), weight1());
+        tabs.addView(navTab("My Salon", screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.EDIT, () -> go(Screen.HOME)), weight1());
+        tabs.addView(navTab("Settings", screen == Screen.SETTINGS || screen == Screen.HOSTING || screen == Screen.HOSTING_EDIT, () -> go(Screen.SETTINGS)), weight1());
         navRow.addView(tabs, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private View navTab(String label, boolean active, Runnable click) {
-        TextView t = Design.text(this, label.toUpperCase(), 11.5f, active ? Design.INK() : Design.DIM(), Design.sansBold());
-        t.setLetterSpacing(0.1f);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(0, dp(12), 0, dp(12));
+        TextView t = Design.text(this, label.toUpperCase(), 10.5f, active ? Design.INK() : Design.DIM(), Design.sansBold());
+        t.setLetterSpacing(0.06f); t.setGravity(Gravity.CENTER); t.setPadding(0, dp(12), 0, dp(12));
         if (active) t.setBackgroundColor(0x14000000);
         t.setOnClickListener(v -> click.run());
         return t;
@@ -195,113 +153,491 @@ public class MainActivity extends AppCompatActivity {
 
     private void masthead(String title) {
         appbar.removeAllViews();
-        LinearLayout pad = new LinearLayout(this);
-        pad.setOrientation(LinearLayout.HORIZONTAL);
-        pad.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout pad = new LinearLayout(this); pad.setOrientation(LinearLayout.HORIZONTAL); pad.setGravity(Gravity.CENTER_VERTICAL);
         pad.setPadding(dp(16), dp(10), dp(16), dp(8));
-        TextView w = Design.display(this, title, 22);
-        pad.addView(w, new LinearLayout.LayoutParams(0, -2, 1));
+        pad.addView(Design.display(this, title, 22), new LinearLayout.LayoutParams(0, -2, 1));
         TextView ver = Design.text(this, "№ " + BuildConfig.VERSION_NAME, 10.5f, Design.DIM(), Design.mono());
-        ver.setPadding(0, 0, dp(8), 0);
-        pad.addView(ver);
-        nodeChip = Design.pill(this, "node", Design.PILL_DIM);
-        pad.addView(nodeChip);
+        ver.setPadding(0, 0, dp(8), 0); pad.addView(ver);
+        nodeChip = Design.pill(this, nodeUp ? "connected" : "no node", Design.PILL_DIM); pad.addView(nodeChip);
         appbar.addView(pad);
         appbar.addView(Design.rule(this, 2), new LinearLayout.LayoutParams(-1, dp(2)));
-        paintNodeChip();
     }
 
-    private void paintNodeChip() {
-        if (nodeChip == null) return;
-        nodeChip.setText(nodeUp ? "connected" : "no node");
-    }
-
-    private void go(Screen s) { screen = s; render(); }
-
-    /* ---------------- router ---------------- */
+    private void go(Screen s) { stopAudio(); screen = s; render(); }
 
     private void render() {
-        buildNav();
-        body.removeAllViews();
+        stopAudio(); buildNav(); body.removeAllViews();
         switch (screen) {
-            case HOME:          renderHome(); break;
-            case ONBOARD:       renderOnboard(); break;
-            case PROFILE_EDIT:  renderProfileEdit(); break;
-            case SETTINGS:      renderSettings(); break;
-            case HOSTING:       renderHosting(); break;
-            case HOSTING_EDIT:  renderHostingEdit(); break;
+            case FEED:         renderFeed(); break;
+            case DISCOVER:     renderDiscover(); break;
+            case HOME:         renderHome(); break;
+            case VIEW:         renderView(); break;
+            case EDIT:         renderEdit(); break;
+            case ONBOARD:      renderOnboard(); break;
+            case SETTINGS:     renderSettings(); break;
+            case HOSTING:      renderHosting(); break;
+            case HOSTING_EDIT: renderHostingEdit(); break;
         }
     }
 
-    /* ---------------- HOME / My Salon ---------------- */
+    /* ================= profile model ================= */
+
+    /** The public profile.json = identity + rich content, from the local draft. */
+    private JSONObject buildProfileJson() {
+        JSONObject me = SalonStore.me(this), p = new JSONObject();
+        putJson(p, "v", "1");
+        for (String k : new String[]{"handle","name","bio","about","avatar","banner","tokenid"})
+            putJson(p, k, me.optString(k, ""));
+        putJson(p, "updated", Long.toString(System.currentTimeMillis() / 1000));
+        try {
+            p.put("links", me.optJSONArray("links") == null ? new JSONArray() : me.optJSONArray("links"));
+            p.put("gallery", me.optJSONArray("gallery") == null ? new JSONArray() : me.optJSONArray("gallery"));
+            p.put("posts", me.optJSONArray("posts") == null ? new JSONArray() : me.optJSONArray("posts"));
+        } catch (Exception ignored) {}
+        return p;
+    }
+
+    /** Re-host profile.json (+ the public web renderer) to <handle>/ and announce. */
+    private void hostProfile(TextView status, Runnable done) {
+        Hosting.Profile def = HostingStore.getDefault(this);
+        if (def == null) { if (status != null) status.setText("Set hosting first."); return; }
+        String handle = SalonStore.get(this, "handle");
+        if (status != null) status.setText("Publishing your page…");
+        JSONObject profile = buildProfileJson();
+        io.execute(() -> {
+            try {
+                Hosting.Uploader up = Hosting.forProfile(def);
+                String url = up.putFile(profile.toString().getBytes("UTF-8"), handle + "/profile.json", "application/json");
+                try { up.putFile(SALON_HTML.getBytes("UTF-8"), handle + "/index.html", "text/html"); } catch (Exception ignore) {}
+                Hosting.verifyUrl(url, def);
+                runOnUiThread(() -> {
+                    SalonStore.put(this, "profileUrl", url);
+                    if (status != null) status.setText("Live.");
+                    if (done != null) done.run();
+                });
+            } catch (Exception e) { runOnUiThread(() -> { if (status != null) status.setText("Publish failed: " + e.getMessage()); }); }
+        });
+    }
+
+    /* ================= FEED ================= */
+
+    private void renderFeed() {
+        masthead("Feed");
+        if (!SalonStore.hasIdentity(this)) { renderOnboard(); return; }
+        JSONArray follows = SalonStore.follows(this);
+        if (follows.length() == 0) {
+            LinearLayout c = card();
+            c.addView(Design.note(this, "Your feed is quiet. Find people in Discover and follow them — their posts land here."));
+            c.addView(btn("Go to Discover", true, () -> go(Screen.DISCOVER)), lph(46, 0, 10, 0, 0));
+            body.addView(c, lp(0, 0, 0, 12));
+            return;
+        }
+        TextView status = Design.note(this, "Pulling posts from " + follows.length() + " salon(s)…");
+        body.addView(status, lp(0, 0, 0, 8));
+        final List<JSONObject> posts = Collections.synchronizedList(new ArrayList<>());
+        final int[] pending = { follows.length() };
+        for (int i = 0; i < follows.length(); i++) {
+            JSONObject f = follows.optJSONObject(i);
+            if (f == null) { pending[0]--; continue; }
+            final String author = f.optString("handle"), url = f.optString("url"), tid = f.optString("tokenid");
+            io.execute(() -> {
+                JSONObject prof = httpGetJson(url);
+                if (prof != null) {
+                    String avatar = prof.optString("avatar", "");
+                    JSONArray ps = prof.optJSONArray("posts");
+                    if (ps != null) for (int k = 0; k < ps.length(); k++) {
+                        JSONObject post = ps.optJSONObject(k);
+                        if (post == null) continue;
+                        try { post.put("_author", author.isEmpty() ? prof.optString("handle") : author); post.put("_avatar", avatar); post.put("_tid", tid); } catch (Exception ignored) {}
+                        posts.add(post);
+                    }
+                }
+                runOnUiThread(() -> { if (--pending[0] == 0) paintFeed(posts, status); });
+            });
+        }
+    }
+
+    private void paintFeed(List<JSONObject> posts, TextView status) {
+        Collections.sort(posts, (a, b) -> Long.compare(b.optLong("ts", 0), a.optLong("ts", 0)));
+        body.removeView(status);
+        if (posts.isEmpty()) { body.addView(Design.note(this, "No posts yet from anyone you follow."), lp(0, 0, 0, 12)); return; }
+        for (JSONObject post : posts) {
+            LinearLayout c = card();
+            LinearLayout head = row();
+            ImageView av = new ImageView(this); av.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            av.setImageBitmap(Identicon.forToken(post.optString("_tid"), 120));
+            if (!post.optString("_avatar").isEmpty()) ImageLoader.loadFull(this, post.optString("_avatar"), av);
+            head.addView(av, new LinearLayout.LayoutParams(dp(34), dp(34)));
+            TextView who = Design.text(this, "@" + post.optString("_author"), 13, Design.ACCENT(), Design.sansBold());
+            who.setPadding(dp(9), 0, 0, 0);
+            who.setOnClickListener(v -> openTokenProfile(post.optString("_tid")));
+            head.addView(who, new LinearLayout.LayoutParams(0, -2, 1));
+            c.addView(head, lp(0, 0, 0, 8));
+            if (!post.optString("text").isEmpty()) c.addView(Design.body(this, post.optString("text")), lp(0, 0, 0, 6));
+            addPostMedia(c, post);
+            body.addView(c, lp(0, 0, 0, 12));
+        }
+    }
+
+    /* ================= DISCOVER ================= */
+
+    private void renderDiscover() {
+        masthead("Discover");
+        LinearLayout head = card();
+        head.addView(Design.note(this, "Everyone on the Salon — read straight off the chain's town square (" + SalonRegistry.SALON_ADDRESS + "). No server, no directory company."));
+        body.addView(head, lp(0, 0, 0, 12));
+        TextView status = Design.note(this, "Reading the square…");
+        body.addView(status, lp(0, 0, 0, 8));
+        if (!nodeUp) { status.setText("Waiting for Minima Core."); return; }
+        SalonRegistry.list(node, entries -> runOnUiThread(() -> {
+            body.removeView(status);
+            if (entries.isEmpty()) { body.addView(Design.note(this, "The square is empty — be the first. Publish your Salon from My Salon."), lp(0, 0, 0, 12)); return; }
+            for (SalonRegistry.Entry e : entries) {
+                LinearLayout c = card(); c.setClickable(true); Design.pressable(c);
+                c.setOnClickListener(v -> openProfile(e));
+                LinearLayout r = row();
+                ImageView av = new ImageView(this); av.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                av.setImageBitmap(Identicon.forToken(e.tokenid, 120));
+                r.addView(av, new LinearLayout.LayoutParams(dp(40), dp(40)));
+                LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(10), 0, 0, 0);
+                col.addView(Design.text(this, "@" + e.handle, 15, Design.INK(), Design.sansBold()));
+                col.addView(Design.text(this, Util.shorten(e.tokenid), 10.5f, Design.DIM(), Design.mono()));
+                r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+                if (SalonStore.isFollowing(this, e.tokenid)) r.addView(Design.pill(this, "following", Design.PILL_DONE));
+                c.addView(r);
+                body.addView(c, lp(0, 0, 0, 10));
+            }
+        }));
+    }
+
+    private void openProfile(SalonRegistry.Entry e) {
+        viewEntry = e; viewProfile = null;
+        go(Screen.VIEW);
+        io.execute(() -> { JSONObject p = httpGetJson(e.url); runOnUiThread(() -> { viewProfile = p; if (screen == Screen.VIEW) render(); }); });
+    }
+
+    private void openTokenProfile(String tokenid) {
+        SalonRegistry.list(node, entries -> {
+            for (SalonRegistry.Entry e : entries) if (e.tokenid.equals(tokenid)) { runOnUiThread(() -> openProfile(e)); return; }
+            runOnUiThread(() -> toast("That salon isn't on the square yet."));
+        });
+    }
+
+    /* ================= VIEW someone else ================= */
+
+    private void renderView() {
+        masthead("Salon");
+        if (viewEntry == null) { go(Screen.DISCOVER); return; }
+        LinearLayout bar = row();
+        bar.addView(btn("← Discover", false, () -> go(Screen.DISCOVER)), weight(40, 0, 4));
+        boolean following = SalonStore.isFollowing(this, viewEntry.tokenid);
+        bar.addView(btn(following ? "Unfollow" : "Follow", !following, () -> {
+            if (following) SalonStore.unfollow(this, viewEntry.tokenid);
+            else SalonStore.follow(this, viewEntry.tokenid, viewEntry.handle, viewEntry.url);
+            render();
+        }), weight(40, 4, 0));
+        body.addView(bar, lp(0, 0, 0, 10));
+        if (viewProfile == null) { body.addView(Design.note(this, "Loading @" + viewEntry.handle + "'s page…"), lp(0, 0, 0, 12)); return; }
+        renderProfilePage(viewProfile, false);
+    }
+
+    /* ================= HOME / My Salon ================= */
 
     private void renderHome() {
         if (!SalonStore.hasIdentity(this)) { masthead("The Salon"); renderOnboard(); return; }
         masthead("My Salon");
-        JSONObject me = SalonStore.me(this);
-
-        LinearLayout card = card();
-        String banner = me.optString("banner", "");
-        if (!banner.isEmpty()) {
-            ImageView bn = new ImageView(this);
-            bn.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            ImageLoader.loadFull(this, banner, bn);
-            card.addView(bn, new LinearLayout.LayoutParams(-1, dp(120)));
-        }
-        LinearLayout idrow = row();
-        String avatar = me.optString("avatar", "");
-        ImageView av = new ImageView(this);
-        av.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        av.setImageBitmap(Identicon.forToken(me.optString("tokenid"), 200));
-        if (!avatar.isEmpty()) ImageLoader.loadFull(this, avatar, av);
-        idrow.addView(av, new LinearLayout.LayoutParams(dp(64), dp(64)));
-        LinearLayout nameCol = new LinearLayout(this);
-        nameCol.setOrientation(LinearLayout.VERTICAL);
-        nameCol.setPadding(dp(12), 0, 0, 0);
-        nameCol.addView(Design.text(this, me.optString("name"), 18, Design.INK(), Design.sansBold()));
-        nameCol.addView(Design.text(this, "@" + me.optString("handle"), 13, Design.ACCENT(), Design.mono()));
-        idrow.addView(nameCol, new LinearLayout.LayoutParams(0, -2, 1));
-        card.addView(idrow, lp(0, 10, 0, 6));
-        if (!me.optString("bio").isEmpty()) card.addView(Design.body(this, me.optString("bio")), lp(0, 4, 0, 4));
-        body.addView(card, lp(0, 0, 0, 12));
-
-        LinearLayout links = card();
-        links.addView(Design.lot(this, "Your page"));
-        addKv(links, "Handle", "@" + me.optString("handle"));
-        addKv(links, "Identity token", shorten(me.optString("tokenid")));
-        addLinkKv(links, "Profile URL", me.optString("profileUrl"));
-        body.addView(links, lp(0, 0, 0, 12));
-
-        body.addView(btn("Edit my page", true, () -> go(Screen.PROFILE_EDIT)), lph(52, 0, 0, 0, 6));
+        renderProfilePage(buildProfileJson(), true);
     }
 
-    /* ---------------- ONBOARD / claim identity ---------------- */
+    /** The one renderer for any Salon — yours (mine=true) or someone else's. */
+    private void renderProfilePage(JSONObject p, boolean mine) {
+        LinearLayout headCard = card();
+        String banner = p.optString("banner", "");
+        if (!banner.isEmpty()) {
+            ImageView bn = new ImageView(this); bn.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            ImageLoader.loadFull(this, banner, bn);
+            headCard.addView(bn, new LinearLayout.LayoutParams(-1, dp(130)));
+        }
+        LinearLayout idrow = row();
+        ImageView av = new ImageView(this); av.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        av.setImageBitmap(Identicon.forToken(p.optString("tokenid"), 220));
+        if (!p.optString("avatar").isEmpty()) ImageLoader.loadFull(this, p.optString("avatar"), av);
+        idrow.addView(av, new LinearLayout.LayoutParams(dp(66), dp(66)));
+        LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, 0, 0);
+        col.addView(Design.text(this, p.optString("name"), 19, Design.INK(), Design.sansBold()));
+        TextView h = Design.text(this, "@" + p.optString("handle"), 13, Design.ACCENT(), Design.mono());
+        copyOnTap(h, "@" + p.optString("handle")); col.addView(h);
+        idrow.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+        headCard.addView(idrow, lp(0, banner.isEmpty() ? 0 : 10, 0, 6));
+        if (!p.optString("bio").isEmpty()) headCard.addView(Design.body(this, p.optString("bio")), lp(0, 4, 0, 2));
+        // web-validation shield (optional webvalidate URL in profile)
+        final LinearLayout shieldSlot = new LinearLayout(this);
+        headCard.addView(shieldSlot);
+        String wv = p.optString("webvalidate", "");
+        if (!wv.isEmpty()) {
+            Boolean st = WebValidate.status(p.optString("tokenid"));
+            if (Boolean.TRUE.equals(st)) shieldSlot.addView(verifiedBadge());
+            WebValidate.ensure(this, p.optString("tokenid"), wv, () -> { shieldSlot.removeAllViews(); if (Boolean.TRUE.equals(WebValidate.status(p.optString("tokenid")))) shieldSlot.addView(verifiedBadge()); });
+        }
+        body.addView(headCard, lp(0, 0, 0, 12));
+
+        if (mine) {
+            LinearLayout actions = row();
+            actions.addView(btn("Edit my page", true, () -> go(Screen.EDIT)), weight(46, 0, 4));
+            actions.addView(btn("Publish", false, () -> publishSalon(null)), weight(46, 4, 0));
+            body.addView(actions, lp(0, 0, 0, 12));
+        }
+
+        if (!p.optString("about").isEmpty()) {
+            LinearLayout c = card(); c.addView(Design.lot(this, "About"));
+            c.addView(Design.body(this, p.optString("about")), lp(0, 6, 0, 0));
+            body.addView(c, lp(0, 0, 0, 12));
+        }
+
+        JSONArray links = p.optJSONArray("links");
+        if (links != null && links.length() > 0) {
+            LinearLayout c = card(); c.addView(Design.lot(this, "Links"));
+            for (int i = 0; i < links.length(); i++) {
+                JSONObject l = links.optJSONObject(i); if (l == null) continue;
+                c.addView(linkRow(l.optString("label", l.optString("url")), l.optString("url")));
+            }
+            body.addView(c, lp(0, 0, 0, 12));
+        }
+
+        JSONArray gal = p.optJSONArray("gallery");
+        if (gal != null && gal.length() > 0) {
+            LinearLayout c = card(); c.addView(Design.lot(this, "Gallery"));
+            c.addView(mediaGrid(gal), lp(0, 8, 0, 0));
+            body.addView(c, lp(0, 0, 0, 12));
+        }
+
+        JSONArray posts = p.optJSONArray("posts");
+        if (posts != null && posts.length() > 0) {
+            LinearLayout c = card(); c.addView(Design.lot(this, "Posts"));
+            for (int i = posts.length() - 1; i >= 0; i--) {
+                JSONObject post = posts.optJSONObject(i); if (post == null) continue;
+                LinearLayout pc = new LinearLayout(this); pc.setOrientation(LinearLayout.VERTICAL);
+                pc.setPadding(0, dp(8), 0, dp(8));
+                if (i < posts.length() - 1) pc.addView(Design.rule(this, 1), new LinearLayout.LayoutParams(-1, dp(1)));
+                if (!post.optString("text").isEmpty()) pc.addView(Design.body(this, post.optString("text")), lp(0, 6, 0, 4));
+                addPostMedia(pc, post);
+                c.addView(pc);
+            }
+            body.addView(c, lp(0, 0, 0, 12));
+        }
+
+        if (mine) {
+            LinearLayout meta = card(); meta.addView(Design.lot(this, "Your page"));
+            copyRow(meta, "Identity token", p.optString("tokenid"));
+            meta.addView(linkRow("Profile URL", SalonStore.get(this, "profileUrl")));
+            body.addView(meta, lp(0, 0, 0, 12));
+        }
+    }
+
+    /* ================= EDIT hub ================= */
+
+    private EditText edAvatar, edBanner; private TextView profStatus;
+
+    private void renderEdit() {
+        masthead("Edit page");
+        JSONObject me = SalonStore.me(this);
+        LinearLayout who = card(); who.addView(Design.lot(this, "You"));
+        EditText name = field(who, "Display name", me.optString("name"), false, "");
+        EditText bio = field(who, "Bio (one line)", me.optString("bio"), false, "");
+        EditText about = fieldMulti(who, "About (long-form)", me.optString("about"));
+        edAvatar = field(who, "Avatar URL", me.optString("avatar"), false, "https://…");
+        who.addView(btn("Upload avatar", false, () -> pickMedia(PICK_AVATAR, "image/*")), lph(42, 0, 4, 0, 6));
+        edBanner = field(who, "Banner URL", me.optString("banner"), false, "https://…");
+        who.addView(btn("Upload banner", false, () -> pickMedia(PICK_BANNER, "image/*")), lph(42, 0, 4, 0, 2));
+        body.addView(who, lp(0, 0, 0, 12));
+
+        // Links
+        LinearLayout linksCard = card(); linksCard.addView(Design.lot(this, "Links"));
+        JSONArray links = SalonStore.arr(this, "links");
+        for (int i = 0; i < links.length(); i++) {
+            JSONObject l = links.optJSONObject(i); final int idx = i;
+            LinearLayout r = row();
+            r.addView(Design.text(this, l.optString("label"), 13, Design.INK(), Design.sansBold()), new LinearLayout.LayoutParams(0, -2, 1));
+            r.addView(btn("✕", false, () -> { JSONArray a = SalonStore.arr(this, "links"); a = removeAt(a, idx); SalonStore.setArr(this, "links", a); render(); }), new LinearLayout.LayoutParams(dp(44), dp(38)));
+            linksCard.addView(r, lp(0, 4, 0, 4));
+        }
+        linksCard.addView(btn("+ Add link", false, this::addLinkDialog), lph(42, 0, 6, 0, 2));
+        body.addView(linksCard, lp(0, 0, 0, 12));
+
+        // Gallery
+        LinearLayout galCard = card(); galCard.addView(Design.lot(this, "Gallery — photos, video, music"));
+        JSONArray gal = SalonStore.arr(this, "gallery");
+        if (gal.length() > 0) galCard.addView(mediaGrid(gal), lp(0, 8, 0, 6));
+        LinearLayout addRow = row();
+        addRow.addView(btn("+ Photo", false, () -> pickMedia(PICK_GALLERY_IMG, "image/*")), weight(42, 0, 4));
+        addRow.addView(btn("+ Video", false, () -> pickMedia(PICK_GALLERY_VID, "video/*")), weight(42, 4, 4));
+        addRow.addView(btn("+ Music", false, () -> pickMedia(PICK_GALLERY_AUD, "audio/*")), weight(42, 4, 0));
+        galCard.addView(addRow, lp(0, 6, 0, 0));
+        body.addView(galCard, lp(0, 0, 0, 12));
+
+        // Posts
+        LinearLayout postCard = card(); postCard.addView(Design.lot(this, "Posts"));
+        postCard.addView(btn("+ New post", false, this::newPostDialog), lph(42, 0, 6, 0, 2));
+        body.addView(postCard, lp(0, 0, 0, 12));
+
+        profStatus = Design.note(this, ""); body.addView(profStatus, lp(0, 4, 0, 0));
+        body.addView(btn("Save & publish", true, () -> {
+            SalonStore.put(this, "name", text(name)); SalonStore.put(this, "bio", text(bio));
+            SalonStore.put(this, "about", text(about));
+            SalonStore.put(this, "avatar", text(edAvatar)); SalonStore.put(this, "banner", text(edBanner));
+            hostProfile(profStatus, () -> { publishSalon(profStatus); toast("Page saved & published."); go(Screen.HOME); });
+        }), lph(52, 0, 8, 0, 0));
+    }
+
+    private void addLinkDialog() {
+        LinearLayout box = dialogBox();
+        EditText label = field(box, "Label", "", false, "My blog");
+        EditText url = field(box, "URL", "", false, "https://…");
+        showDialog("Add link", box, "Add", () -> {
+            if (text(url).isEmpty()) return;
+            JSONArray a = SalonStore.arr(this, "links");
+            try { JSONObject o = new JSONObject(); o.put("label", text(label).isEmpty() ? text(url) : text(label)); o.put("url", text(url)); a.put(o); } catch (Exception ignored) {}
+            SalonStore.setArr(this, "links", a); render();
+        });
+    }
+
+    private void newPostDialog() {
+        LinearLayout box = dialogBox();
+        EditText textF = fieldMulti(box, "Say something", "");
+        showDialog("New post", box, "Post", () -> {
+            JSONArray a = SalonStore.arr(this, "posts");
+            try { JSONObject o = new JSONObject(); o.put("ts", System.currentTimeMillis() / 1000); o.put("text", text(textF)); a.put(o); } catch (Exception ignored) {}
+            SalonStore.setArr(this, "posts", a);
+            toast("Posted — hit Save & publish to push it live."); render();
+        });
+    }
+
+    /* ================= media: pick / upload / play ================= */
+
+    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45;
+
+    private void pickMedia(int code, String mime) {
+        if (HostingStore.getDefault(this) == null) { toast("Set hosting first."); return; }
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType(mime);
+        startActivityForResult(Intent.createChooser(i, "Choose"), code);
+    }
+
+    @Override protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (res != RESULT_OK || data == null || data.getData() == null) return;
+        final Uri uri = data.getData();
+        final int r = req;
+        if (profStatus != null) profStatus.setText("Uploading…");
+        io.execute(() -> {
+            try {
+                String handle = SalonStore.get(this, "handle");
+                Hosting.Profile def = HostingStore.getDefault(this);
+                byte[] bytes; String ext, mime, kind;
+                if (r == PICK_GALLERY_VID) { bytes = readCapped(uri, 60); ext = ".mp4"; mime = "video/mp4"; kind = "video"; }
+                else if (r == PICK_GALLERY_AUD) { bytes = readCapped(uri, 25); ext = ".mp3"; mime = "audio/mpeg"; kind = "audio"; }
+                else { bytes = readScaledJpeg(uri, r == PICK_AVATAR ? 640 : 1400); ext = ".jpg"; mime = "image/jpeg"; kind = "image"; }
+                String rel = handle + "/media/" + kind + "-" + Long.toString(System.currentTimeMillis(), 36) + ext;
+                String url = Hosting.forProfile(def).putFile(bytes, rel, mime);
+                runOnUiThread(() -> {
+                    if (r == PICK_AVATAR && edAvatar != null) { edAvatar.setText(url); SalonStore.put(this, "avatar", url); }
+                    else if (r == PICK_BANNER && edBanner != null) { edBanner.setText(url); SalonStore.put(this, "banner", url); }
+                    else { JSONArray a = SalonStore.arr(this, "gallery"); try { JSONObject o = new JSONObject(); o.put("type", kind); o.put("url", url); a.put(o); } catch (Exception ignored) {} SalonStore.setArr(this, "gallery", a); render(); }
+                    if (profStatus != null) profStatus.setText("Uploaded.");
+                });
+            } catch (Exception e) { runOnUiThread(() -> { if (profStatus != null) profStatus.setText("Upload failed: " + e.getMessage()); }); }
+        });
+    }
+
+    private LinearLayout mediaGrid(JSONArray items) {
+        LinearLayout grid = new LinearLayout(this); grid.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout r = null;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject m = items.optJSONObject(i); if (m == null) continue;
+            if (i % 3 == 0) { r = new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); grid.addView(r, lp(0, 0, 0, 6)); }
+            r.addView(mediaTile(m), tileLp(i % 3));
+        }
+        if (r != null) { int rem = items.length() % 3; for (int k = 0; k < (rem == 0 ? 0 : 3 - rem); k++) { View sp = new View(this); r.addView(sp, tileLp(1)); } }
+        return grid;
+    }
+
+    private LinearLayout.LayoutParams tileLp(int col) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(96), 1); if (col > 0) p.leftMargin = dp(6); return p; }
+
+    private View mediaTile(JSONObject m) {
+        String type = m.optString("type", "image"), url = m.optString("url");
+        FrameLayout f = new FrameLayout(this); f.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
+        if ("image".equals(type)) {
+            ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            if (!url.isEmpty()) ImageLoader.loadFull(this, url, iv);
+            f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
+        } else {
+            TextView glyph = Design.text(this, "video".equals(type) ? "▶" : "♪", 26, Design.INK(), Design.sansBold());
+            glyph.setGravity(Gravity.CENTER);
+            f.addView(glyph, new FrameLayout.LayoutParams(-1, -1));
+        }
+        f.setClickable(true);
+        f.setOnClickListener(v -> playMedia(type, url));
+        return f;
+    }
+
+    private void playMedia(String type, String url) {
+        if (url.isEmpty()) return;
+        if ("audio".equals(type)) { toggleAudio(url); return; }
+        Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+        if ("video".equals(type)) {
+            VideoView vv = new VideoView(this);
+            MediaController mc = new MediaController(this); mc.setAnchorView(vv);
+            vv.setMediaController(mc); vv.setVideoURI(Uri.parse(url));
+            FrameLayout fl = new FrameLayout(this); fl.setBackgroundColor(0xFF000000);
+            fl.addView(vv, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+            fl.setOnClickListener(v -> d.dismiss());
+            d.setContentView(fl); d.show(); vv.start();
+        } else {
+            ImageView iv = new ImageView(this); iv.setBackgroundColor(0xFF000000); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            ImageLoader.loadFull(this, url, iv); iv.setOnClickListener(v -> d.dismiss());
+            d.setContentView(iv); d.show();
+        }
+    }
+
+    private void toggleAudio(String url) {
+        try {
+            if (audio != null && audio.isPlaying()) { stopAudio(); toast("Paused"); return; }
+            stopAudio(); audio = new MediaPlayer();
+            audio.setDataSource(url); audio.setOnPreparedListener(MediaPlayer::start); audio.prepareAsync();
+            toast("Playing…");
+        } catch (Exception e) { toast("Couldn't play: " + e.getMessage()); }
+    }
+
+    private void stopAudio() { if (audio != null) { try { audio.release(); } catch (Exception ignored) {} audio = null; } }
+
+    private void addPostMedia(LinearLayout parent, JSONObject post) {
+        String type = post.optString("type", post.optString("mtype", "")), media = post.optString("media", "");
+        if (media.isEmpty()) return;
+        if (type.isEmpty()) type = "image";
+        JSONArray one = new JSONArray(); try { JSONObject o = new JSONObject(); o.put("type", type); o.put("url", media); one.put(o); } catch (Exception ignored) {}
+        parent.addView(mediaGrid(one), lp(0, 4, 0, 2));
+    }
+
+    /* ================= ONBOARD / claim (unchanged core) ================= */
 
     private void renderOnboard() {
         LinearLayout intro = card();
         intro.addView(Design.lot(this, "№ 1 · Open your Salon"));
-        intro.addView(Design.note(this, "Your identity becomes a signed token you own forever. Your page is a "
-                + "file you host and can edit any time. First set a hosting destination, then claim your handle."), lp(0, 6, 0, 0));
+        intro.addView(Design.note(this, "Your identity becomes a signed token you own forever. Your page is a file you host and edit any time. First set hosting, then claim your handle."), lp(0, 6, 0, 0));
         body.addView(intro, lp(0, 0, 0, 12));
 
         Hosting.Profile def = HostingStore.getDefault(this);
-        LinearLayout hostCard = card();
-        hostCard.addView(Design.lot(this, "Hosting"));
-        addKv(hostCard, "Destination", def == null ? "none set — required" : def.name() + " · " + def.type());
+        LinearLayout hostCard = card(); hostCard.addView(Design.lot(this, "Hosting"));
+        addKvPlain(hostCard, "Destination", def == null ? "none set — required" : def.name() + " · " + def.type());
         hostCard.addView(btn(def == null ? "Set up hosting" : "Manage hosting", def == null, () -> go(Screen.HOSTING)), lph(46, 0, 8, 0, 0));
         body.addView(hostCard, lp(0, 0, 0, 12));
 
-        LinearLayout form = card();
-        form.addView(Design.lot(this, "Claim your handle"));
+        LinearLayout form = card(); form.addView(Design.lot(this, "Claim your handle"));
         EditText handle = field(form, "Handle", SalonStore.get(this, "handle"), false, "e.g. eurobuddha");
         EditText name = field(form, "Display name", SalonStore.get(this, "name"), false, "Euro Buddha");
         EditText bio = field(form, "Bio", SalonStore.get(this, "bio"), false, "one line about you");
-        final TextView status = Design.note(this, "");
-        form.addView(status, lp(0, 8, 0, 0));
-        claimBtn = btn("Claim my Salon", true, () -> claimIdentity(
-                text(handle), text(name), text(bio), status));
-        claimBtn.setEnabled(!claiming);
-        if (claiming) claimBtn.setAlpha(0.4f);
+        final TextView status = Design.note(this, ""); form.addView(status, lp(0, 8, 0, 0));
+        claimBtn = btn("Claim my Salon", true, () -> claimIdentity(text(handle), text(name), text(bio), status));
+        claimBtn.setEnabled(!claiming); if (claiming) claimBtn.setAlpha(0.4f);
         form.addView(claimBtn, lph(52, 0, 10, 0, 0));
         body.addView(form, lp(0, 0, 0, 12));
     }
@@ -314,268 +650,129 @@ public class MainActivity extends AppCompatActivity {
         if (def == null) { status.setText("Set a hosting destination first."); return; }
         if (!nodeUp) { status.setText("Waiting for Minima Core."); return; }
         if (pubkey.isEmpty()) { status.setText("Fetching your key… try again in a moment."); fetchPubkey(); return; }
-
         claiming = true; setClaimEnabled(false);
         final String h = handle, n = name.trim(), b = bio.trim();
         SalonStore.put(this, "handle", h); SalonStore.put(this, "name", n); SalonStore.put(this, "bio", b);
-        status.setText("Publishing your page to your hosting…");
-
+        status.setText("Publishing your page…");
         io.execute(() -> {
             try {
-                JSONObject profile = buildProfile(h, n, b, "", "");
-                String rel = h + "/profile.json";
+                JSONObject profile = buildProfileJson();
                 Hosting.Uploader up = Hosting.forProfile(def);
-                String profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), rel, "application/json");
+                String profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), h + "/profile.json", "application/json");
+                try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
                 Hosting.verifyUrl(profileUrl, def);
-                runOnUiThread(() -> {
-                    SalonStore.put(this, "profileUrl", profileUrl);
-                    status.setText("Page live. Checking for your identity…");
-                    adoptOrMint(h, n, b, profileUrl, status);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> { status.setText("Hosting failed: " + e.getMessage()); claimFailed(); });
-            }
+                runOnUiThread(() -> { SalonStore.put(this, "profileUrl", profileUrl); status.setText("Page live. Checking identity…"); adoptOrMint(h, n, b, profileUrl, status); });
+            } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> { promptTrustHostKey(def, hk.fingerprint, status); claimFailed(); }); }
+            catch (Exception e) { runOnUiThread(() -> { status.setText("Hosting failed: " + e.getMessage()); claimFailed(); }); }
         });
     }
 
-    /** Idempotent: if a salon token for this handle already exists in the wallet,
-     *  ADOPT it — never mint a second. Only mint when none is found. */
     private void adoptOrMint(String h, String n, String b, String url, TextView status) {
         node.cmd("balance", new NodeApi.Cb() {
-            @Override public void onResult(JSONObject json) {
-                String tid = findSalonToken(json, h);
-                if (!tid.isEmpty()) { runOnUiThread(() -> finishClaim(tid)); return; }
-                runOnUiThread(() -> { status.setText("Minting your identity token…"); mintIdentity(h, n, b, url, status); });
-            }
-            @Override public void onError(String m) {
-                runOnUiThread(() -> { status.setText("Minting your identity token…"); mintIdentity(h, n, b, url, status); });
-            }
+            @Override public void onResult(JSONObject j) { String tid = findSalonToken(j, h); if (!tid.isEmpty()) runOnUiThread(() -> finishClaim(tid)); else runOnUiThread(() -> { status.setText("Minting your identity token…"); mintIdentity(h, n, b, url, status); }); }
+            @Override public void onError(String m) { runOnUiThread(() -> { status.setText("Minting your identity token…"); mintIdentity(h, n, b, url, status); }); }
         });
     }
 
     private void mintIdentity(String handle, String name, String bio, String profileUrl, TextView status) {
         JSONObject meta = new JSONObject();
-        putJson(meta, "salon", "1");
-        putJson(meta, "handle", handle);
-        putJson(meta, "name", name);
-        putJson(meta, "url", profileUrl);
-        putJson(meta, "bio", bio);
-        String cmd = "tokencreate name:" + meta + " amount:1 decimals:0 signtoken:" + pubkey;
-        node.cmd(cmd, new NodeApi.Cb() {
+        putJson(meta, "salon", "1"); putJson(meta, "handle", handle); putJson(meta, "name", name); putJson(meta, "url", profileUrl); putJson(meta, "bio", bio);
+        node.cmd("tokencreate name:" + meta + " amount:1 decimals:0 signtoken:" + pubkey, new NodeApi.Cb() {
             @Override public void onResult(JSONObject json) {
-                if (!json.optBoolean("status", false)) {
-                    runOnUiThread(() -> { status.setText("Mint failed: " + json.optString("error", "tokencreate rejected")); claimFailed(); });
-                    return;
-                }
-                runOnUiThread(() -> { status.setText("Minting… confirming on-chain (leave this open)."); pollForIdentity(handle, 0, status); });
+                if (!json.optBoolean("status", false)) { runOnUiThread(() -> { status.setText("Mint failed: " + json.optString("error", "rejected")); claimFailed(); }); return; }
+                runOnUiThread(() -> { status.setText("Minting… confirming (leave open)."); pollForIdentity(handle, 0, status); });
             }
             @Override public void onError(String m) { runOnUiThread(() -> { status.setText("Mint failed: " + m); claimFailed(); }); }
         });
     }
 
-    /** After tokencreate, watch the wallet for our new salon token by handle. */
     private void pollForIdentity(String handle, int tries, TextView status) {
         node.cmd("balance", new NodeApi.Cb() {
             @Override public void onResult(JSONObject json) {
                 String tid = findSalonToken(json, handle);
-                if (!tid.isEmpty()) {
-                    runOnUiThread(() -> finishClaim(tid));
-                } else if (tries < 30) {
-                    body.postDelayed(() -> pollForIdentity(handle, tries + 1, status), 4000);
-                } else {
-                    runOnUiThread(() -> { status.setText("Minted — confirming. Reopen shortly and it'll adopt your token."); claiming = false; });
-                }
+                if (!tid.isEmpty()) runOnUiThread(() -> finishClaim(tid));
+                else if (tries < 30) body.postDelayed(() -> pollForIdentity(handle, tries + 1, status), 4000);
+                else runOnUiThread(() -> { status.setText("Minted — confirming. Reopen shortly, it'll adopt."); claiming = false; });
             }
-            @Override public void onError(String m) {
-                if (tries < 30) body.postDelayed(() -> pollForIdentity(handle, tries + 1, status), 4000);
-                else runOnUiThread(() -> claiming = false);
-            }
+            @Override public void onError(String m) { if (tries < 30) body.postDelayed(() -> pollForIdentity(handle, tries + 1, status), 4000); else runOnUiThread(() -> claiming = false); }
         });
     }
 
     private void finishClaim(String tokenid) {
-        SalonStore.put(this, "tokenid", tokenid);
-        claiming = false;
-        Toast.makeText(this, "Your Salon is open.", Toast.LENGTH_LONG).show();
-        go(Screen.HOME);
+        SalonStore.put(this, "tokenid", tokenid); claiming = false;
+        publishSalon(null);   // put myself on the square
+        toast("Your Salon is open."); go(Screen.HOME);
     }
-
     private void claimFailed() { claiming = false; setClaimEnabled(true); }
+    private void setClaimEnabled(boolean on) { if (claimBtn != null) { claimBtn.setEnabled(on); claimBtn.setAlpha(on ? 1f : 0.4f); } }
 
-    private void setClaimEnabled(boolean on) {
-        if (claimBtn != null) { claimBtn.setEnabled(on); claimBtn.setAlpha(on ? 1f : 0.4f); }
+    private JSONObject findAnySalonToken(JSONObject j) { return findSalonEntry(j, null); }
+    private String findSalonToken(JSONObject j, String handle) { JSONObject t = findSalonEntry(j, handle); return t == null ? "" : t.optString("tokenid"); }
+    private JSONObject findSalonEntry(JSONObject balanceJson, String handle) {
+        try {
+            JSONArray arr = balanceJson.optJSONArray("response"); if (arr == null) return null;
+            for (int i = 0; i < arr.length(); i++) { JSONObject t = arr.optJSONObject(i); if (t == null) continue; JSONObject meta = t.optJSONObject("token"); if (meta == null) continue;
+                if ("1".equals(meta.optString("salon")) && (handle == null || handle.equals(meta.optString("handle")))) return t; }
+        } catch (Exception ignored) {}
+        return null;
+    }
+    private void adoptFromToken(JSONObject tokenRow) {
+        try { JSONObject meta = tokenRow.optJSONObject("token");
+            SalonStore.put(this, "tokenid", tokenRow.optString("tokenid")); SalonStore.put(this, "handle", meta.optString("handle"));
+            if (SalonStore.get(this, "name").isEmpty()) SalonStore.put(this, "name", meta.optString("name"));
+            if (SalonStore.get(this, "bio").isEmpty()) SalonStore.put(this, "bio", meta.optString("bio"));
+            SalonStore.put(this, "profileUrl", meta.optString("url")); claiming = false;
+            if (screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.FEED) go(Screen.HOME);
+        } catch (Exception ignored) {}
     }
 
-    /** balance entry shape: { "token": {salon,handle,name,url,bio}, "tokenid", … }
-     *  — the metadata object is DIRECTLY under "token" (not token.name). */
-    private String findSalonToken(JSONObject balanceJson, String handle) {
-        JSONObject t = findSalonEntry(balanceJson, handle);
-        return t == null ? "" : t.optString("tokenid");
+    private void publishSalon(TextView status) {
+        if (!nodeUp || !SalonStore.hasIdentity(this)) { if (status != null) status.setText("Need the node to publish."); return; }
+        SalonRegistry.announce(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"), SalonStore.get(this, "handle"),
+                (ok, msg) -> runOnUiThread(() -> { if (status != null) status.setText(msg); else toast(msg); }));
     }
 
-    /* ---------------- PROFILE EDIT ---------------- */
-
-    private static final int PICK_AVATAR = 41, PICK_BANNER = 42;
-    private EditText edAvatar, edBanner;   // so upload callbacks can fill them
-    private TextView profStatus;
-
-    private void renderProfileEdit() {
-        masthead("Edit page");
-        JSONObject me = SalonStore.me(this);
-        LinearLayout form = card();
-        form.addView(Design.lot(this, "Your page"));
-        EditText name = field(form, "Display name", me.optString("name"), false, "");
-        EditText bio = field(form, "Bio", me.optString("bio"), false, "");
-        edAvatar = field(form, "Avatar image URL", me.optString("avatar"), false, "https://…/avatar.jpg");
-        form.addView(btn("Upload avatar from photos", false, () -> pickImage(PICK_AVATAR)), lph(44, 0, 4, 0, 8));
-        edBanner = field(form, "Banner image URL", me.optString("banner"), false, "https://…/banner.jpg");
-        form.addView(btn("Upload banner from photos", false, () -> pickImage(PICK_BANNER)), lph(44, 0, 4, 0, 8));
-        profStatus = Design.note(this, "");
-        form.addView(profStatus, lp(0, 8, 0, 0));
-        form.addView(btn("Save page", true, () -> saveProfile(text(name), text(bio), text(edAvatar), text(edBanner))), lph(52, 0, 8, 0, 0));
-        body.addView(form, lp(0, 0, 0, 12));
-    }
-
-    private void saveProfile(String name, String bio, String avatar, String banner) {
-        Hosting.Profile def = HostingStore.getDefault(this);
-        if (def == null) { profStatus.setText("Set hosting first."); return; }
-        String handle = SalonStore.get(this, "handle");
-        profStatus.setText("Saving your page to your hosting…");
-        io.execute(() -> {
-            try {
-                JSONObject profile = buildProfile(handle, name, bio, avatar, banner);
-                String rel = handle + "/profile.json";
-                Hosting.Uploader up = Hosting.forProfile(def);
-                String url = up.putFile(profile.toString().getBytes("UTF-8"), rel, "application/json");
-                Hosting.verifyUrl(url, def);
-                runOnUiThread(() -> {
-                    SalonStore.put(this, "name", name); SalonStore.put(this, "bio", bio);
-                    SalonStore.put(this, "avatar", avatar); SalonStore.put(this, "banner", banner);
-                    SalonStore.put(this, "profileUrl", url);
-                    Toast.makeText(this, "Page updated — instantly, no fee.", Toast.LENGTH_SHORT).show();
-                    go(Screen.HOME);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> profStatus.setText("Save failed: " + e.getMessage()));
-            }
-        });
-    }
-
-    private JSONObject buildProfile(String handle, String name, String bio, String avatar, String banner) {
-        JSONObject p = new JSONObject();
-        putJson(p, "v", "1"); putJson(p, "handle", handle); putJson(p, "name", name);
-        putJson(p, "bio", bio); putJson(p, "avatar", avatar); putJson(p, "banner", banner);
-        putJson(p, "updated", Long.toString(System.currentTimeMillis() / 1000));
-        try { p.put("posts", new JSONArray()); } catch (Exception ignored) {}
-        return p;
-    }
-
-    /* ---------------- image pick + upload ---------------- */
-
-    private void pickImage(int code) {
-        if (HostingStore.getDefault(this) == null) { toast("Set hosting first."); return; }
-        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
-        i.setType("image/*");
-        startActivityForResult(Intent.createChooser(i, "Choose image"), code);
-    }
-
-    @Override protected void onActivityResult(int req, int res, Intent data) {
-        super.onActivityResult(req, res, data);
-        if ((req != PICK_AVATAR && req != PICK_BANNER) || res != RESULT_OK || data == null || data.getData() == null) return;
-        final Uri uri = data.getData();
-        final boolean avatar = req == PICK_AVATAR;
-        if (profStatus != null) profStatus.setText("Uploading image…");
-        io.execute(() -> {
-            try {
-                byte[] jpeg = readScaledJpeg(uri, avatar ? 640 : 1280);
-                Hosting.Profile def = HostingStore.getDefault(this);
-                String handle = SalonStore.get(this, "handle");
-                String rel = handle + "/" + (avatar ? "avatar-" : "banner-") + Hosting.ts36() + ".jpg";
-                String url = Hosting.forProfile(def).putFile(jpeg, rel, "image/jpeg");
-                runOnUiThread(() -> {
-                    if (avatar && edAvatar != null) edAvatar.setText(url);
-                    if (!avatar && edBanner != null) edBanner.setText(url);
-                    if (profStatus != null) profStatus.setText("Image uploaded.");
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> { if (profStatus != null) profStatus.setText("Upload failed: " + e.getMessage()); });
-            }
-        });
-    }
-
-    private byte[] readScaledJpeg(Uri uri, int maxDim) throws Exception {
-        InputStream in = getContentResolver().openInputStream(uri);
-        Bitmap bmp = BitmapFactory.decodeStream(in);
-        if (in != null) in.close();
-        if (bmp == null) throw new Exception("could not read image");
-        int w = bmp.getWidth(), h = bmp.getHeight();
-        float k = Math.min(1f, (float) maxDim / Math.max(w, h));
-        if (k < 1f) bmp = Bitmap.createScaledBitmap(bmp, Math.round(w * k), Math.round(h * k), true);
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        bmp.compress(Bitmap.CompressFormat.JPEG, 88, bos);
-        return bos.toByteArray();
-    }
-
-    /* ---------------- SETTINGS ---------------- */
+    /* ================= SETTINGS + HOSTING (unchanged) ================= */
 
     private void renderSettings() {
         masthead("Settings");
-        LinearLayout nodeCard = card();
-        nodeCard.addView(Design.lot(this, "Minima Core"));
-        addKv(nodeCard, "Node", nodeUp ? "connected" : "not connected — enable The Salon in Minima → Apps");
+        LinearLayout nodeCard = card(); nodeCard.addView(Design.lot(this, "Minima Core"));
+        addKvPlain(nodeCard, "Node", nodeUp ? "connected" : "not connected — enable The Salon in Minima → Apps");
         body.addView(nodeCard, lp(0, 0, 0, 12));
-
         Hosting.Profile def = HostingStore.getDefault(this);
-        LinearLayout hostCard = card();
-        hostCard.addView(Design.lot(this, "Hosting"));
-        hostCard.addView(Design.note(this, "Upload your page and images to your OWN storage — SFTP straight to your server, or WebDAV / IPFS / GitHub."), lp(0, 4, 0, 6));
-        addKv(hostCard, "Default", def == null ? "none yet" : def.name() + " · " + def.type());
+        LinearLayout hostCard = card(); hostCard.addView(Design.lot(this, "Hosting"));
+        hostCard.addView(Design.note(this, "Your page + all media upload to your OWN storage — SFTP straight to your server, or WebDAV / IPFS / GitHub."), lp(0, 4, 0, 6));
+        addKvPlain(hostCard, "Default", def == null ? "none yet" : def.name() + " · " + def.type());
         hostCard.addView(btn("Manage destinations", true, () -> go(Screen.HOSTING)), lph(48, 0, 8, 0, 0));
         body.addView(hostCard, lp(0, 0, 0, 12));
-
         if (SalonStore.hasIdentity(this)) {
-            JSONObject me = SalonStore.me(this);
-            LinearLayout idc = card();
-            idc.addView(Design.lot(this, "Identity"));
-            addKv(idc, "Handle", "@" + me.optString("handle"));
-            addKv(idc, "Token", shorten(me.optString("tokenid")));
+            LinearLayout idc = card(); idc.addView(Design.lot(this, "Identity"));
+            copyRow(idc, "Handle", "@" + SalonStore.get(this, "handle"));
+            copyRow(idc, "Token", SalonStore.get(this, "tokenid"));
+            idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
             body.addView(idc, lp(0, 0, 0, 12));
         }
-
-        LinearLayout about = card();
-        about.addView(Design.lot(this, "Colophon"));
-        addKv(about, "App", "The Salon");
-        addKv(about, "Version", BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")");
+        LinearLayout about = card(); about.addView(Design.lot(this, "Colophon"));
+        addKvPlain(about, "App", "The Salon"); addKvPlain(about, "Version", BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")");
         body.addView(about, lp(0, 0, 0, 12));
     }
-
-    /* ---------------- HOSTING list + edit ---------------- */
 
     private void renderHosting() {
         masthead("Hosting");
         List<Hosting.Profile> profiles = HostingStore.list(this);
-        if (profiles.isEmpty()) {
-            LinearLayout empty = card();
-            empty.addView(Design.note(this, "No destinations yet. Add one — SFTP uploads straight to your own server; "
-                    + "no server? a free Pinata key pins to IPFS."));
-            body.addView(empty, lp(0, 0, 0, 12));
-        }
+        if (profiles.isEmpty()) { LinearLayout e = card(); e.addView(Design.note(this, "No destinations yet. Add one — SFTP uploads straight to your own server.")); body.addView(e, lp(0, 0, 0, 12)); }
         for (Hosting.Profile p : profiles) {
-            LinearLayout card = card();
-            LinearLayout head = row();
-            head.addView(Design.text(this, p.name().isEmpty() ? "(unnamed)" : p.name(), 15, Design.INK(), Design.sansBold()),
-                    new LinearLayout.LayoutParams(0, -2, 1));
-            head.addView(Design.pill(this, p.type(), Design.PILL_DIM));
-            if (p.isDefault()) head.addView(Design.pill(this, "default", Design.PILL_DONE));
-            card.addView(head, lp(0, 0, 0, 8));
+            LinearLayout c = card(); LinearLayout head = row();
+            head.addView(Design.text(this, p.name().isEmpty() ? "(unnamed)" : p.name(), 15, Design.INK(), Design.sansBold()), new LinearLayout.LayoutParams(0, -2, 1));
+            head.addView(Design.pill(this, p.type(), Design.PILL_DIM)); if (p.isDefault()) head.addView(Design.pill(this, "default", Design.PILL_DONE));
+            c.addView(head, lp(0, 0, 0, 8));
             LinearLayout r = row();
             r.addView(btn("Test", false, () -> testProfile(p)), weight(31, 0, 4));
             r.addView(btn("Edit", false, () -> { hostEdit = p; go(Screen.HOSTING_EDIT); }), weight(31, 4, 4));
             r.addView(btn("Delete", false, () -> { HostingStore.remove(this, p.id()); render(); }), weight(31, 4, 0));
-            card.addView(r, lp(0, 0, 0, 6));
-            if (!p.isDefault())
-                card.addView(btn("Make default", false, () -> { HostingStore.setDefault(this, p.id()); render(); }), lph(42, 0, 0, 0, 0));
-            body.addView(card, lp(0, 0, 0, 12));
+            c.addView(r, lp(0, 0, 0, 6));
+            if (!p.isDefault()) c.addView(btn("Make default", false, () -> { HostingStore.setDefault(this, p.id()); render(); }), lph(42, 0, 0, 0, 0));
+            body.addView(c, lp(0, 0, 0, 12));
         }
         body.addView(btn("Add destination", true, () -> { hostEdit = null; go(Screen.HOSTING_EDIT); }), lph(52, 0, 4, 0, 8));
     }
@@ -587,73 +784,39 @@ public class MainActivity extends AppCompatActivity {
         masthead(hostEdit == null ? "Add destination" : "Edit destination");
         if (hostEdit == null) hostEdit = Hosting.Profile.fresh(Hosting.TYPE_SFTP);
         final Hosting.Profile p = hostEdit;
-
         LinearLayout card = card();
         EditText nameF = field(card, "Name", p.name(), false, "my server");
         nameF.addTextChangedListener(watch(s -> Hosting.put(p.j, "name", s)));
-
         card.addView(Design.kicker(this, "Type"), lp(0, 8, 0, 4));
         LinearLayout chips = row();
-        for (int i = 0; i < HTYPES.length; i++) {
-            final String t = HTYPES[i];
-            TextView chip = Design.chip(this, HLABELS[i], t.equals(p.type()));
-            chip.setPadding(dp(11), dp(6), dp(11), dp(6));
-            chip.setOnClickListener(v -> { if (!t.equals(p.type())) { Hosting.put(p.j, "type", t);
-                if (p.j.optJSONObject(t) == null) Hosting.put(p.j, t, new JSONObject()); render(); } });
-            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2); clp.rightMargin = dp(6);
-            chips.addView(chip, clp);
-        }
-        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
-        hs.setHorizontalScrollBarEnabled(false); hs.addView(chips);
+        for (int i = 0; i < HTYPES.length; i++) { final String t = HTYPES[i]; TextView chip = Design.chip(this, HLABELS[i], t.equals(p.type())); chip.setPadding(dp(11), dp(6), dp(11), dp(6));
+            chip.setOnClickListener(v -> { if (!t.equals(p.type())) { Hosting.put(p.j, "type", t); if (p.j.optJSONObject(t) == null) Hosting.put(p.j, t, new JSONObject()); render(); } });
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2); clp.rightMargin = dp(6); chips.addView(chip, clp); }
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this); hs.setHorizontalScrollBarEnabled(false); hs.addView(chips);
         card.addView(hs, lp(0, 0, 0, 6));
-
         JSONObject cfg = p.cfg();
         switch (p.type()) {
             case Hosting.TYPE_SFTP:
-                cfgField(card, cfg, "host", "Host", "eurobuddha.com", false);
-                cfgField(card, cfg, "port", "Port", "22", false);
-                cfgField(card, cfg, "user", "User", "root", false);
+                cfgField(card, cfg, "host", "Host", "31.125.188.214", false); cfgField(card, cfg, "port", "Port", "22", false); cfgField(card, cfg, "user", "User", "root", false);
                 boolean keyAuth = "key".equals(cfg.optString("auth", "password"));
                 card.addView(Design.kicker(this, "Authentication"), lp(0, 8, 0, 4));
-                LinearLayout ar = row();
-                TextView pw = Design.chip(this, "Password", !keyAuth), ky = Design.chip(this, "Private key", keyAuth);
+                LinearLayout ar = row(); TextView pw = Design.chip(this, "Password", !keyAuth), ky = Design.chip(this, "Private key", keyAuth);
                 pw.setPadding(dp(11), dp(6), dp(11), dp(6)); ky.setPadding(dp(11), dp(6), dp(11), dp(6));
-                pw.setOnClickListener(v -> { Hosting.put(cfg, "auth", "password"); render(); });
-                ky.setOnClickListener(v -> { Hosting.put(cfg, "auth", "key"); render(); });
-                LinearLayout.LayoutParams m8 = new LinearLayout.LayoutParams(-2, -2); m8.rightMargin = dp(8);
-                ar.addView(pw, m8); ar.addView(ky);
-                card.addView(ar, lp(0, 0, 0, 6));
-                if (keyAuth) cfgSecretMulti(card, cfg, "privateKey", "Private key (paste PEM)");
-                else cfgSecret(card, cfg, "password", "Password");
+                pw.setOnClickListener(v -> { Hosting.put(cfg, "auth", "password"); render(); }); ky.setOnClickListener(v -> { Hosting.put(cfg, "auth", "key"); render(); });
+                LinearLayout.LayoutParams m8 = new LinearLayout.LayoutParams(-2, -2); m8.rightMargin = dp(8); ar.addView(pw, m8); ar.addView(ky); card.addView(ar, lp(0, 0, 0, 6));
+                if (keyAuth) cfgSecretMulti(card, cfg, "privateKey", "Private key (paste PEM)"); else cfgSecret(card, cfg, "password", "Password");
                 cfgField(card, cfg, "remoteRoot", "Remote root (server dir)", "/var/www/html/salon", false);
-                cfgField(card, cfg, "urlPrefix", "Public URL prefix", "https://eurobuddha.com/salon/", false);
-                break;
+                cfgField(card, cfg, "urlPrefix", "Public URL prefix", "http://31.125.188.214/salon/", false); break;
             case Hosting.TYPE_WEBDAV:
-                cfgField(card, cfg, "endpoint", "Write endpoint", "https://dav.example.com/files/", false);
-                cfgField(card, cfg, "user", "User", "", false);
-                cfgSecret(card, cfg, "password", "Password");
-                cfgField(card, cfg, "urlPrefix", "Public URL prefix", "https://example.com/files/", false);
-                break;
+                cfgField(card, cfg, "endpoint", "Write endpoint", "https://dav.example.com/files/", false); cfgField(card, cfg, "user", "User", "", false); cfgSecret(card, cfg, "password", "Password"); cfgField(card, cfg, "urlPrefix", "Public URL prefix", "https://example.com/files/", false); break;
             case Hosting.TYPE_KUBO:
-                cfgField(card, cfg, "apiUrl", "kubo API", "http://127.0.0.1:5001", false);
-                cfgField(card, cfg, "gateway", "Public gateway", "https://ipfs.eurobuddha.com", false);
-                break;
+                cfgField(card, cfg, "apiUrl", "kubo API", "http://127.0.0.1:5001", false); cfgField(card, cfg, "gateway", "Public gateway", "https://ipfs.eurobuddha.com", false); break;
             case Hosting.TYPE_PINATA:
-                cfgSecret(card, cfg, "jwt", "Pinata JWT");
-                cfgField(card, cfg, "gateway", "Gateway", "https://gateway.pinata.cloud", false);
-                break;
+                cfgSecret(card, cfg, "jwt", "Pinata JWT"); cfgField(card, cfg, "gateway", "Gateway", "https://gateway.pinata.cloud", false); break;
             case Hosting.TYPE_GITHUB:
-                cfgField(card, cfg, "owner", "Owner", "", false);
-                cfgField(card, cfg, "repo", "Repo", "", false);
-                cfgField(card, cfg, "branch", "Branch", "main", false);
-                cfgSecret(card, cfg, "token", "Token (PAT)");
-                cfgField(card, cfg, "serve", "Serve via (raw/pages)", "raw", false);
-                cfgField(card, cfg, "pagesPrefix", "Pages prefix", "", false);
-                break;
+                cfgField(card, cfg, "owner", "Owner", "", false); cfgField(card, cfg, "repo", "Repo", "", false); cfgField(card, cfg, "branch", "Branch", "main", false); cfgSecret(card, cfg, "token", "Token (PAT)"); cfgField(card, cfg, "serve", "Serve via (raw/pages)", "raw", false); cfgField(card, cfg, "pagesPrefix", "Pages prefix", "", false); break;
         }
-
-        final TextView status = Design.note(this, "");
-        card.addView(status, lp(0, 8, 0, 0));
+        final TextView status = Design.note(this, ""); card.addView(status, lp(0, 8, 0, 0));
         LinearLayout btns = row();
         btns.addView(btn("Save", true, () -> { saveHost(p); go(Screen.HOSTING); }), weight(48, 0, 4));
         btns.addView(btn("Save & test", false, () -> { saveHost(p); testProfile(p, status); }), weight(48, 4, 0));
@@ -663,212 +826,187 @@ public class MainActivity extends AppCompatActivity {
 
     private void saveHost(Hosting.Profile p) {
         if (p.name().isEmpty()) Hosting.put(p.j, "name", p.type());
-        // Salon's own path templates (Atelier default names -> salon)
-        Hosting.put(p.j, "pathTemplate", "salon/{collection}/{name}-{ts}{ext}");
-        Hosting.put(p.j, "dirTemplate", "salon/{collection}-{ts}");
+        Hosting.put(p.j, "pathTemplate", "salon/{collection}/{name}-{ts}{ext}"); Hosting.put(p.j, "dirTemplate", "salon/{collection}-{ts}");
         HostingStore.upsert(this, p);
-        if (HostingStore.getDefault(this) == null || HostingStore.list(this).size() == 1)
-            HostingStore.setDefault(this, p.id());
+        if (HostingStore.getDefault(this) == null || HostingStore.list(this).size() == 1) HostingStore.setDefault(this, p.id());
     }
 
     private void testProfile(Hosting.Profile p) { testProfile(p, null); }
-
     private void testProfile(Hosting.Profile p, TextView status) {
         if (status != null) status.setText("Testing…"); else toast("Testing " + p.name() + "…");
         io.execute(() -> {
             String msg;
-            try {
-                String rel = "_test/probe-" + Hosting.ts36() + ".txt";
-                Hosting.Uploader up = Hosting.forProfile(p);
-                String url = up.putFile(("salon-test " + System.currentTimeMillis()).getBytes("UTF-8"), rel, "text/plain");
-                Hosting.verifyUrl(url, p);
-                msg = "OK — uploaded and served: " + url;
-            } catch (SftpUploader.HostKeyUnverified hk) {
-                runOnUiThread(() -> promptTrustHostKey(p, hk.fingerprint, status));
-                return;
+            try { String rel = "_test/probe-" + Long.toString(System.currentTimeMillis(), 36) + ".txt";
+                String url = Hosting.forProfile(p).putFile(("salon-test").getBytes("UTF-8"), rel, "text/plain"); Hosting.verifyUrl(url, p); msg = "OK — uploaded and served: " + url;
+            } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> promptTrustHostKey(p, hk.fingerprint, status)); return;
             } catch (Exception e) { msg = "Failed: " + e.getMessage(); }
-            final String m = msg;
-            runOnUiThread(() -> { if (status != null) status.setText(m); else toast(m); });
+            final String m = msg; runOnUiThread(() -> { if (status != null) status.setText(m); else toast(m); });
         });
     }
 
-    /** First-contact TOFU: show the server's SSH host-key fingerprint and, on the
-     *  user's OK, pin it to the profile so every future connect is verified. */
     private void promptTrustHostKey(Hosting.Profile p, String fp, TextView status) {
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Trust this server?")
-                .setMessage("First connection to " + p.cfgStr("host") + ".\n\nSSH host-key fingerprint:\n" + fp
-                        + "\n\nTrust it only if this is your server. It'll be pinned — if the key ever changes "
-                        + "you'll be warned (possible interception).")
-                .setPositiveButton("Trust & pin", (d, w) -> {
-                    Hosting.put(p.cfg(), "hostKeyFp", fp);
-                    HostingStore.upsert(this, p);
-                    testProfile(p, status);
-                })
-                .setNegativeButton("Cancel", (d, w) -> { if (status != null) status.setText("Not trusted — nothing saved."); })
-                .show();
+        new android.app.AlertDialog.Builder(this).setTitle("Trust this server?")
+                .setMessage("First connection to " + p.cfgStr("host") + ".\n\nSSH host-key fingerprint:\n" + fp + "\n\nTrust it only if this is your server. It'll be pinned.")
+                .setPositiveButton("Trust & pin", (d, w) -> { Hosting.put(p.cfg(), "hostKeyFp", fp); HostingStore.upsert(this, p); testProfile(p, status); })
+                .setNegativeButton("Cancel", (d, w) -> { if (status != null) status.setText("Not trusted."); }).show();
     }
 
-    /* ---------------- node key ---------------- */
+    /* ================= node key ================= */
 
     private void fetchPubkey() {
         node.cmd("keys", new NodeApi.Cb() {
-            @Override public void onResult(JSONObject json) {
-                String pk = firstPublicKey(json);
-                if (!pk.isEmpty()) runOnUiThread(() -> pubkey = pk);
-                else node.cmd("getaddress", new NodeApi.Cb() {
-                    @Override public void onResult(JSONObject j2) {
-                        JSONObject r = j2.optJSONObject("response");
-                        if (r != null && !r.optString("publickey").isEmpty()) runOnUiThread(() -> pubkey = r.optString("publickey"));
-                    }
-                    @Override public void onError(String m) {}
-                });
-            }
-            @Override public void onError(String m) {}
-        });
+            @Override public void onResult(JSONObject json) { String pk = firstPublicKey(json); if (!pk.isEmpty()) runOnUiThread(() -> pubkey = pk); else node.cmd("getaddress", new NodeApi.Cb() {
+                @Override public void onResult(JSONObject j2) { JSONObject r = j2.optJSONObject("response"); if (r != null && !r.optString("publickey").isEmpty()) runOnUiThread(() -> pubkey = r.optString("publickey")); }
+                @Override public void onError(String m) {} }); }
+            @Override public void onError(String m) {} });
     }
-
     private String firstPublicKey(JSONObject json) {
         Object resp = json.opt("response");
-        try {
-            if (resp instanceof JSONArray) {
-                JSONArray a = (JSONArray) resp;
-                if (a.length() > 0 && a.optJSONObject(0) != null) return a.optJSONObject(0).optString("publickey", "");
-            } else if (resp instanceof JSONObject) {
-                JSONArray keys = ((JSONObject) resp).optJSONArray("keys");
-                if (keys != null && keys.length() > 0 && keys.optJSONObject(0) != null) return keys.optJSONObject(0).optString("publickey", "");
-                return ((JSONObject) resp).optString("publickey", "");
-            }
+        try { if (resp instanceof JSONArray) { JSONArray a = (JSONArray) resp; if (a.length() > 0 && a.optJSONObject(0) != null) return a.optJSONObject(0).optString("publickey", ""); }
+            else if (resp instanceof JSONObject) { JSONArray keys = ((JSONObject) resp).optJSONArray("keys"); if (keys != null && keys.length() > 0) return keys.optJSONObject(0).optString("publickey", ""); return ((JSONObject) resp).optString("publickey", ""); }
         } catch (Exception ignored) {}
         return "";
     }
 
-    /* ---------------- UI helpers ---------------- */
+    /* ================= HTTP ================= */
+
+    private JSONObject httpGetJson(String url) {
+        HttpURLConnection c = null;
+        try {
+            if (url == null || !url.startsWith("http")) return null;
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(8000); c.setReadTimeout(10000); c.setRequestProperty("User-Agent", "TheSalon");
+            if (c.getResponseCode() != 200) return null;
+            InputStream in = c.getInputStream(); ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192]; int n, tot = 0; while ((n = in.read(buf)) > 0 && tot < 1_000_000) { bos.write(buf, 0, n); tot += n; } in.close();
+            return new JSONObject(bos.toString("UTF-8"));
+        } catch (Exception e) { return null; } finally { if (c != null) c.disconnect(); }
+    }
+
+    private byte[] readCapped(Uri uri, int maxMB) throws Exception {
+        InputStream in = getContentResolver().openInputStream(uri);
+        if (in == null) throw new Exception("cannot read file");
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(); byte[] buf = new byte[16384]; int n; long tot = 0, cap = (long) maxMB * 1024 * 1024;
+        while ((n = in.read(buf)) > 0) { tot += n; if (tot > cap) { in.close(); throw new Exception("file too large (max " + maxMB + " MB)"); } bos.write(buf, 0, n); }
+        in.close(); return bos.toByteArray();
+    }
+
+    private byte[] readScaledJpeg(Uri uri, int maxDim) throws Exception {
+        InputStream in = getContentResolver().openInputStream(uri); Bitmap bmp = BitmapFactory.decodeStream(in); if (in != null) in.close();
+        if (bmp == null) throw new Exception("could not read image");
+        int w = bmp.getWidth(), h = bmp.getHeight(); float k = Math.min(1f, (float) maxDim / Math.max(w, h));
+        if (k < 1f) bmp = Bitmap.createScaledBitmap(bmp, Math.round(w * k), Math.round(h * k), true);
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG, 88, bos); return bos.toByteArray();
+    }
+
+    /* ================= UI helpers ================= */
 
     private int dp(int v) { return Design.dp(this, v); }
+    private LinearLayout card() { LinearLayout c = new LinearLayout(this); c.setOrientation(LinearLayout.VERTICAL); c.setBackground(Design.blockShadow(this, Design.CARD())); c.setPadding(dp(14), dp(12), dp(14), dp(12)); return c; }
+    private LinearLayout row() { LinearLayout r = new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setGravity(Gravity.CENTER_VERTICAL); return r; }
 
-    private LinearLayout card() {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackground(Design.blockShadow(this, Design.CARD()));
-        c.setPadding(dp(14), dp(12), dp(14), dp(12));
-        return c;
-    }
-
-    private LinearLayout row() {
-        LinearLayout r = new LinearLayout(this);
-        r.setOrientation(LinearLayout.HORIZONTAL);
-        r.setGravity(Gravity.CENTER_VERTICAL);
-        return r;
-    }
-
-    private void addKv(LinearLayout parent, String k, String v) {
-        LinearLayout r = row();
-        r.setPadding(0, dp(4), 0, dp(4));
-        TextView key = Design.text(this, k.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold());
-        key.setLetterSpacing(0.12f);
+    private void addKvPlain(LinearLayout parent, String k, String v) {
+        LinearLayout r = row(); r.setPadding(0, dp(4), 0, dp(4));
+        TextView key = Design.text(this, k.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()); key.setLetterSpacing(0.12f);
         r.addView(key, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView val = Design.text(this, v == null ? "—" : v, 11.5f, Design.INK(), Design.mono());
-        val.setGravity(Gravity.END);
-        r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.5f));
-        parent.addView(r);
+        TextView val = Design.text(this, v == null ? "—" : v, 11.5f, Design.INK(), Design.mono()); val.setGravity(Gravity.END);
+        r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.6f)); parent.addView(r);
     }
 
-    private void addLinkKv(LinearLayout parent, String k, String url) {
-        LinearLayout r = row();
-        r.setPadding(0, dp(4), 0, dp(4));
-        TextView key = Design.text(this, k.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold());
-        key.setLetterSpacing(0.12f);
+    /** kv row: shortened value, TAP copies the FULL value. */
+    private void copyRow(LinearLayout parent, String k, String full) {
+        LinearLayout r = row(); r.setPadding(0, dp(4), 0, dp(4));
+        TextView key = Design.text(this, k.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()); key.setLetterSpacing(0.12f);
         r.addView(key, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView val = Design.text(this, url == null ? "—" : url, 11f, Design.ACCENT(), Design.mono());
-        val.setGravity(Gravity.END);
-        val.setPaintFlags(val.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
-        val.setMaxLines(2);
-        if (url != null && !url.isEmpty()) val.setOnClickListener(v -> openUrl(url));
-        r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.8f));
-        parent.addView(r);
+        TextView val = Design.text(this, Util.shorten(full), 11.5f, Design.INK(), Design.mono()); val.setGravity(Gravity.END);
+        copyOnTap(val, full); r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.6f)); parent.addView(r);
+    }
+
+    private void copyOnTap(TextView t, String full) {
+        t.setClickable(true);
+        t.setOnClickListener(v -> { ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE); cm.setPrimaryClip(ClipData.newPlainText("salon", full)); toast("Copied"); });
+    }
+
+    /** label + tappable vermilion underlined link (opens browser), long-press copies. */
+    private LinearLayout linkRow(String label, String url) {
+        LinearLayout r = row(); r.setPadding(0, dp(5), 0, dp(5));
+        TextView key = Design.text(this, label.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()); key.setLetterSpacing(0.1f);
+        r.addView(key, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView val = Design.text(this, url, 11f, Design.ACCENT(), Design.mono()); val.setGravity(Gravity.END);
+        val.setPaintFlags(val.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG); val.setMaxLines(2);
+        val.setClickable(true); val.setOnClickListener(v -> openUrl(url));
+        val.setOnLongClickListener(v -> { ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE); cm.setPrimaryClip(ClipData.newPlainText("salon", url)); toast("Copied"); return true; });
+        r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.8f)); return r;
+    }
+
+    private TextView verifiedBadge() {
+        int gold = 0xFF9A7B1F; TextView t = Design.text(this, "✓ WEB-VERIFIED", 9.5f, gold, Design.sansBold());
+        t.setLetterSpacing(0.1f); t.setPadding(dp(8), dp(5), dp(8), dp(6)); t.setBackground(Design.ruled(this, Design.CARD(), gold, 2)); return t;
     }
 
     private EditText field(LinearLayout parent, String label, String value, boolean secret, String hint) {
         parent.addView(Design.text(this, label.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()), lp(0, 8, 0, 3));
-        EditText e = new EditText(this);
-        e.setText(value == null ? "" : value);
-        e.setHint(hint);
-        e.setTextColor(Design.INK());
-        e.setTextSize(14);
-        e.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 1));
-        e.setPadding(dp(10), dp(9), dp(10), dp(9));
+        EditText e = new EditText(this); e.setText(value == null ? "" : value); e.setHint(hint); e.setTextColor(Design.INK()); e.setTextSize(14);
+        e.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 1)); e.setPadding(dp(10), dp(9), dp(10), dp(9));
         if (secret) e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        parent.addView(e, new LinearLayout.LayoutParams(-1, -2));
-        return e;
+        parent.addView(e, new LinearLayout.LayoutParams(-1, -2)); return e;
     }
-
-    /** cfg field bound to the profile JSON (plaintext). */
-    private void cfgField(LinearLayout parent, JSONObject cfg, String key, String label, String hint, boolean secret) {
-        EditText e = field(parent, label, cfg.optString(key, ""), secret, hint);
-        e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, s)));
+    private EditText fieldMulti(LinearLayout parent, String label, String value) {
+        parent.addView(Design.text(this, label.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()), lp(0, 8, 0, 3));
+        EditText e = new EditText(this); e.setText(value == null ? "" : value); e.setTextColor(Design.INK()); e.setTextSize(14);
+        e.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 1)); e.setPadding(dp(10), dp(9), dp(10), dp(9));
+        e.setMinLines(3); e.setGravity(Gravity.TOP); e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        parent.addView(e, new LinearLayout.LayoutParams(-1, -2)); return e;
     }
-
-    /** secret cfg field — stored encrypted, prefilled decrypted. */
-    private void cfgSecret(LinearLayout parent, JSONObject cfg, String key, String label) {
-        String plain = Crypt.decrypt(cfg.optString(key, ""));
-        EditText e = field(parent, label, plain, true, "••••••");
-        e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, Crypt.encrypt(s))));
-    }
-
+    private void cfgField(LinearLayout parent, JSONObject cfg, String key, String label, String hint, boolean secret) { EditText e = field(parent, label, cfg.optString(key, ""), secret, hint); e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, s))); }
+    private void cfgSecret(LinearLayout parent, JSONObject cfg, String key, String label) { EditText e = field(parent, label, Crypt.decrypt(cfg.optString(key, "")), true, "••••••"); e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, Crypt.encrypt(s)))); }
     private void cfgSecretMulti(LinearLayout parent, JSONObject cfg, String key, String label) {
         parent.addView(Design.text(this, label.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()), lp(0, 8, 0, 3));
-        EditText e = new EditText(this);
-        e.setText(Crypt.decrypt(cfg.optString(key, "")));
-        e.setTextColor(Design.INK()); e.setTextSize(11);
-        e.setTypeface(Design.mono());
-        e.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 1));
-        e.setPadding(dp(10), dp(9), dp(10), dp(9));
-        e.setMinLines(4); e.setGravity(Gravity.TOP);
-        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, Crypt.encrypt(s))));
+        EditText e = new EditText(this); e.setText(Crypt.decrypt(cfg.optString(key, ""))); e.setTextColor(Design.INK()); e.setTextSize(11); e.setTypeface(Design.mono());
+        e.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 1)); e.setPadding(dp(10), dp(9), dp(10), dp(9)); e.setMinLines(4); e.setGravity(Gravity.TOP);
+        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE); e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, Crypt.encrypt(s))));
         parent.addView(e, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    private TextView btn(String label, boolean filled, Runnable click) {
-        TextView b = Design.button(this, label, filled);
-        b.setOnClickListener(v -> click.run());
-        return b;
+    private TextView btn(String label, boolean filled, Runnable click) { TextView b = Design.button(this, label, filled); b.setOnClickListener(v -> click.run()); return b; }
+
+    private LinearLayout dialogBox() { LinearLayout b = new LinearLayout(this); b.setOrientation(LinearLayout.VERTICAL); b.setPadding(dp(18), dp(6), dp(18), dp(6)); return b; }
+    private void showDialog(String title, LinearLayout content, String ok, Runnable onOk) {
+        new android.app.AlertDialog.Builder(this).setTitle(title).setView(content)
+                .setPositiveButton(ok, (d, w) -> onOk.run()).setNegativeButton("Cancel", null).show();
     }
 
-    private void openUrl(String url) {
-        try {
-            String u = url.trim();
-            if (!u.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) u = "https://" + u;
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
-        } catch (Exception e) { toast("Couldn't open link"); }
-    }
+    private JSONArray removeAt(JSONArray a, int idx) { JSONArray out = new JSONArray(); for (int i = 0; i < a.length(); i++) if (i != idx) out.put(a.opt(i)); return out; }
 
+    private void openUrl(String url) { try { String u = url.trim(); if (!u.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) u = "http://" + u; startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u))); } catch (Exception e) { toast("Couldn't open link"); } }
     private void toast(String m) { Toast.makeText(this, m, Toast.LENGTH_SHORT).show(); }
     private String text(EditText e) { return e.getText().toString(); }
-    private String shorten(String s) { return s == null || s.length() < 14 ? s : s.substring(0, 8) + "…" + s.substring(s.length() - 4); }
     private static void putJson(JSONObject o, String k, String v) { try { o.put(k, v == null ? "" : v); } catch (Exception ignored) {} }
+    private TextWatcher watch(final java.util.function.Consumer<String> on) { return new TextWatcher() { public void beforeTextChanged(CharSequence s, int a, int b, int c) {} public void onTextChanged(CharSequence s, int a, int b, int c) {} public void afterTextChanged(android.text.Editable s) { on.accept(s.toString()); } }; }
 
-    private TextWatcher watch(final java.util.function.Consumer<String> onText) {
-        return new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void afterTextChanged(Editable s) { onText.accept(s.toString()); }
-        };
-    }
-
-    /* layout param helpers */
-    private LinearLayout.LayoutParams lp(int l, int t, int r, int b) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
-        p.setMargins(dp(l), dp(t), dp(r), dp(b)); return p;
-    }
-    private LinearLayout.LayoutParams lph(int h, int l, int t, int r, int b) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(h));
-        p.setMargins(dp(l), dp(t), dp(r), dp(b)); return p;
-    }
-    private LinearLayout.LayoutParams weight(int hDp, int lm, int rm) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(hDp), 1);
-        p.setMargins(dp(lm), 0, dp(rm), 0); return p;
-    }
+    private LinearLayout.LayoutParams lp(int l, int t, int r, int b) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2); p.setMargins(dp(l), dp(t), dp(r), dp(b)); return p; }
+    private LinearLayout.LayoutParams lph(int h, int l, int t, int r, int b) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(h)); p.setMargins(dp(l), dp(t), dp(r), dp(b)); return p; }
+    private LinearLayout.LayoutParams weight(int hDp, int lm, int rm) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(hDp), 1); p.setMargins(dp(lm), 0, dp(rm), 0); return p; }
     private LinearLayout.LayoutParams weight1() { return new LinearLayout.LayoutParams(0, -2, 1); }
+
+    /* Public web renderer uploaded beside profile.json — fetches ./profile.json and draws a real page. */
+    private static final String SALON_HTML =
+        "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        + "<title>The Salon</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#F2F1EC;color:#141310}"
+        + ".w{max-width:680px;margin:0 auto;padding:0 16px 64px}.ban{width:100%;height:180px;object-fit:cover;display:block}"
+        + ".av{width:88px;height:88px;border-radius:8px;object-fit:cover;border:2px solid #141310;margin-top:-30px;background:#ddd}"
+        + "h1{font-size:26px;margin:10px 0 2px}.h{color:#E63312;font-family:monospace}.bio{font-size:16px}"
+        + ".k{font:700 11px/1 monospace;letter-spacing:.15em;text-transform:uppercase;color:#6B6A64;margin:26px 0 8px;border-bottom:2px solid #141310;padding-bottom:6px}"
+        + "a.l{display:block;padding:11px 13px;border:1.5px solid #141310;background:#FCFBF7;margin:8px 0;color:#141310;text-decoration:none;box-shadow:3px 3px 0 #141310}"
+        + ".g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.g>*{aspect-ratio:1;width:100%;object-fit:cover;border:1.5px solid #141310;background:#000}"
+        + ".post{border:1.5px solid #141310;background:#FCFBF7;padding:12px 14px;margin:10px 0;box-shadow:3px 3px 0 #141310}"
+        + "video,audio{width:100%}img.pm{width:100%;border:1.5px solid #141310;margin-top:8px}</style></head><body><div class=w>"
+        + "<div id=b></div></div><script>fetch('./profile.json').then(r=>r.json()).then(p=>{var e=function(s){var d=document.createElement('div');d.innerHTML=s;return d.firstChild};"
+        + "var b=document.getElementById('b');var h='';if(p.banner)h+=\"<img class=ban src='\"+p.banner+\"'>\";"
+        + "h+=\"<img class=av src='\"+(p.avatar||'')+\"'>\";h+='<h1>'+(p.name||'')+'</h1>';h+=\"<div class=h>@\"+(p.handle||'')+'</div>';if(p.bio)h+='<div class=bio>'+p.bio+'</div>';"
+        + "if(p.about){h+='<div class=k>About</div><div>'+p.about+'</div>'}"
+        + "if(p.links&&p.links.length){h+='<div class=k>Links</div>';p.links.forEach(function(l){h+=\"<a class=l href='\"+l.url+\"'>\"+(l.label||l.url)+'</a>'})}"
+        + "if(p.gallery&&p.gallery.length){h+='<div class=k>Gallery</div><div class=g>';p.gallery.forEach(function(m){if(m.type=='video')h+=\"<video src='\"+m.url+\"' controls></video>\";else if(m.type=='audio')h+=\"<div style='display:flex;align-items:center;justify-content:center'>&#9835;</div>\";else h+=\"<img src='\"+m.url+\"'>\"});h+='</div>';p.gallery.forEach(function(m){if(m.type=='audio')h+=\"<audio src='\"+m.url+\"' controls></audio>\"})}"
+        + "if(p.posts&&p.posts.length){h+='<div class=k>Posts</div>';p.posts.slice().reverse().forEach(function(t){h+='<div class=post>'+(t.text||'');if(t.media){if(t.type=='video')h+=\"<video src='\"+t.media+\"' controls></video>\";else if(t.type=='audio')h+=\"<audio src='\"+t.media+\"' controls></audio>\";else h+=\"<img class=pm src='\"+t.media+\"'>\"}h+='</div>'})}"
+        + "b.innerHTML=h}).catch(function(){document.getElementById('b').innerHTML='<p>Profile not found.</p>'})</script></body></html>";
 }

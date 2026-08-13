@@ -3,6 +3,7 @@ package com.eurobuddha.salon;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
@@ -47,5 +48,53 @@ final class SalonStore {
         JSONObject m = me(c);
         try { m.put(k, v == null ? "" : v); } catch (Exception ignored) {}
         save(c, m);
+    }
+
+    /* ---- rich content arrays (links / gallery / posts) live inside "me" ---- */
+
+    static JSONArray arr(Context c, String k) {
+        JSONArray a = me(c).optJSONArray(k);
+        return a == null ? new JSONArray() : a;
+    }
+
+    static void setArr(Context c, String k, JSONArray a) {
+        JSONObject m = me(c);
+        try { m.put(k, a == null ? new JSONArray() : a); } catch (Exception ignored) {}
+        save(c, m);
+    }
+
+    /* ---- follows: a device-side list of {tokenid, handle, url} ---- */
+
+    static JSONArray follows(Context c) {
+        return arr(c, "follows");
+    }
+
+    static boolean isFollowing(Context c, String tokenid) {
+        JSONArray f = follows(c);
+        for (int i = 0; i < f.length(); i++) {
+            JSONObject o = f.optJSONObject(i);
+            if (o != null && tokenid.equals(o.optString("tokenid"))) return true;
+        }
+        return false;
+    }
+
+    static void follow(Context c, String tokenid, String handle, String url) {
+        if (tokenid == null || tokenid.isEmpty() || isFollowing(c, tokenid)) return;
+        JSONArray f = follows(c);
+        try {
+            JSONObject o = new JSONObject();
+            o.put("tokenid", tokenid); o.put("handle", handle == null ? "" : handle); o.put("url", url == null ? "" : url);
+            f.put(o);
+        } catch (Exception ignored) {}
+        setArr(c, "follows", f);
+    }
+
+    static void unfollow(Context c, String tokenid) {
+        JSONArray f = follows(c), next = new JSONArray();
+        for (int i = 0; i < f.length(); i++) {
+            JSONObject o = f.optJSONObject(i);
+            if (o != null && !tokenid.equals(o.optString("tokenid"))) next.put(o);
+        }
+        setArr(c, "follows", next);
     }
 }
