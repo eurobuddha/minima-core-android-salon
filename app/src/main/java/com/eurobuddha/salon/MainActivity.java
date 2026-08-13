@@ -78,6 +78,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean nodeUp = false;
     private String pubkey = "";
     private boolean adoptChecked = false;
+    private boolean reannouncedThisSession = false;
 
     // Minima's provably-unspendable "RETURN FALSE" graveyard — burning a coin
     // here destroys it forever (same address Atelier's StateNft.buryCommands uses).
@@ -147,6 +148,14 @@ public class MainActivity extends AppCompatActivity {
                 @Override public void onResult(JSONObject j) { JSONObject t = findAnySalonToken(j); if (t != null) runOnUiThread(() -> adoptFromToken(t)); }
                 @Override public void onError(String m) {}
             });
+        }
+        // Gossip mesh: once per session, re-post any faded pointer (own + a few
+        // others) so the square stays alive collectively. Gated on the on-chain
+        // fade check inside keepAlive, so it no-ops unless something has faded.
+        if (nodeUp && !reannouncedThisSession && SalonStore.hasIdentity(this)) {
+            reannouncedThisSession = true;
+            SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
+                    SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
         }
     }
 
