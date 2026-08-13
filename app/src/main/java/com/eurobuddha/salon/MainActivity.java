@@ -59,7 +59,14 @@ public class MainActivity extends AppCompatActivity {
 
     private NodeApi node;
     private final ExecutorService io = Executors.newFixedThreadPool(3);
+
+    // Persistent audio: the player and its docked mini-bar outlive screen changes.
     private MediaPlayer audio;
+    private final Handler playback = new Handler(Looper.getMainLooper());
+    private LinearLayout miniPlayer;
+    private TextView miniTitle, miniPlay, miniTime;
+    private SeekBar miniBar;
+    private boolean miniSeeking = false;
 
     private enum Screen { FEED, DISCOVER, HOME, VIEW, EDIT, ONBOARD, SETTINGS, HOSTING, HOSTING_EDIT }
     private Screen screen = Screen.HOME;
@@ -96,6 +103,9 @@ public class MainActivity extends AppCompatActivity {
         body.setPadding(dp(16), dp(10), dp(16), dp(28));
         scroll.addView(body, new FrameLayout.LayoutParams(-1, -2));
         chrome.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        buildMiniPlayer();
+        chrome.addView(miniPlayer, new LinearLayout.LayoutParams(-1, -2));
 
         navRow = new LinearLayout(this); navRow.setOrientation(LinearLayout.VERTICAL);
         navRow.setBackgroundColor(Design.PAPER());
@@ -166,10 +176,10 @@ public class MainActivity extends AppCompatActivity {
         appbar.addView(Design.rule(this, 2), new LinearLayout.LayoutParams(-1, dp(2)));
     }
 
-    private void go(Screen s) { stopAudio(); screen = s; render(); }
+    private void go(Screen s) { screen = s; render(); }   // audio keeps playing across screens
 
     private void render() {
-        stopAudio(); buildNav(); body.removeAllViews();
+        buildNav(); body.removeAllViews();
         switch (screen) {
             case FEED:         renderFeed(); break;
             case DISCOVER:     renderDiscover(); break;
@@ -413,10 +423,7 @@ public class MainActivity extends AppCompatActivity {
         JSONArray gal = p.optJSONArray("gallery");
         if (gal != null && gal.length() > 0) {
             LinearLayout c = card(); c.addView(Design.lot(this, "Gallery"));
-            for (int i = 0; i < gal.length(); i++) {
-                JSONObject m = gal.optJSONObject(i); if (m == null) continue;
-                c.addView(mediaCard(m), lp(0, 10, 0, 0));
-            }
+            renderGallery(c, gal);
             body.addView(c, lp(0, 0, 0, 12));
         }
 
@@ -625,7 +632,7 @@ public class MainActivity extends AppCompatActivity {
             LinearLayout ar = row(); ar.setPadding(dp(11), dp(2), dp(11), dp(12));
             TextView note = Design.text(this, "♪", 26, Design.INK(), Design.sansBold());
             ar.addView(note, new LinearLayout.LayoutParams(dp(38), -2));
-            ar.addView(btn("▶ Play", true, () -> openAudioPlayer(url, cap.isEmpty() ? "Untitled track" : cap)), new LinearLayout.LayoutParams(0, dp(46), 1));
+            ar.addView(btn("▶ Play", true, () -> playTrack(url, cap.isEmpty() ? "Untitled track" : cap)), new LinearLayout.LayoutParams(0, dp(46), 1));
             col.addView(ar);
         }
         return col;
@@ -651,63 +658,206 @@ public class MainActivity extends AppCompatActivity {
         vv.setOnPreparedListener(mp -> { mp.setLooping(false); vv.start(); mc.show(0); });
     }
 
-    /** A proper audio modal: title, seek bar with elapsed/total, and
-     *  rewind-10 / play-pause / stop / forward-10 controls. */
-    private void openAudioPlayer(String url, String title) {
+    /* ---------- gallery as a collection: photo grid, video carousel, playlist ---------- */
+
+    /** Renders the whole gallery as Instagram-style collections — photos in a
+     *  captioned grid (tap → swipeable carousel), videos in a horizontal
+     *  carousel, songs as a playlist that plays in the persistent mini-player. */
+    private void renderGallery(LinearLayout c, JSONArray gal) {
+        List<JSONObject> photos = new ArrayList<>(), videos = new ArrayList<>(), tracks = new ArrayList<>();
+        for (int i = 0; i < gal.length(); i++) {
+            JSONObject m = gal.optJSONObject(i); if (m == null) continue;
+            String t = m.optString("type", "image");
+            if ("audio".equals(t)) tracks.add(m); else if ("video".equals(t)) videos.add(m); else photos.add(m);
+        }
+        if (!photos.isEmpty()) { c.addView(subLabel("Photos · " + photos.size()), lp(0, 10, 0, 6)); c.addView(photoGrid(photos)); }
+        if (!videos.isEmpty()) { c.addView(subLabel("Video · " + videos.size()), lp(0, 16, 0, 6)); c.addView(videoCarousel(videos)); }
+        if (!tracks.isEmpty()) { c.addView(subLabel("Music · " + tracks.size()), lp(0, 16, 0, 6)); c.addView(trackList(tracks)); }
+    }
+
+    private TextView subLabel(String s) { TextView t = Design.text(this, s.toUpperCase(), 9f, Design.DIM(), Design.sansBold()); t.setLetterSpacing(0.14f); return t; }
+
+    private LinearLayout.LayoutParams cellLp(int col) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, -2, 1); if (col == 0) p.rightMargin = dp(4); else p.leftMargin = dp(4); return p; }
+
+    private View photoGrid(final List<JSONObject> photos) {
+        LinearLayout grid = new LinearLayout(this); grid.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout r = null;
+        for (int i = 0; i < photos.size(); i++) {
+            final int idx = i; JSONObject m = photos.get(i);
+            if (i % 2 == 0) { r = new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); grid.addView(r, lp(0, 0, 0, 8)); }
+            LinearLayout cell = new LinearLayout(this); cell.setOrientation(LinearLayout.VERTICAL);
+            ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP); iv.setBackgroundColor(0xFF141310);
+            if (!m.optString("url").isEmpty()) ImageLoader.loadFull(this, m.optString("url"), iv);
+            iv.setClickable(true); iv.setOnClickListener(v -> openCarousel(photos, idx));
+            cell.addView(iv, new LinearLayout.LayoutParams(-1, dp(150)));
+            String cap = m.optString("caption", "");
+            if (!cap.isEmpty()) { TextView ct = Design.text(this, cap, 11.5f, Design.DIM(), Design.sans()); ct.setPadding(dp(1), dp(4), 0, 0); ct.setMaxLines(2); cell.addView(ct); }
+            r.addView(cell, cellLp(i % 2));
+        }
+        if (photos.size() % 2 == 1 && r != null) r.addView(new View(this), cellLp(1));
+        return grid;
+    }
+
+    private View videoCarousel(final List<JSONObject> videos) {
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this); hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout rowv = new LinearLayout(this); rowv.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < videos.size(); i++) {
+            final JSONObject m = videos.get(i);
+            LinearLayout cell = new LinearLayout(this); cell.setOrientation(LinearLayout.VERTICAL);
+            FrameLayout f = new FrameLayout(this); f.setBackground(Design.ruled(this, 0xFF141310, Design.INK(), 1));
+            TextView play = Design.text(this, "▶", 30, 0xFFF2F1EC, Design.sansBold()); play.setGravity(Gravity.CENTER);
+            f.addView(play, new FrameLayout.LayoutParams(-1, -1));
+            f.setClickable(true); f.setOnClickListener(v -> openVideo(m.optString("url")));
+            cell.addView(f, new LinearLayout.LayoutParams(dp(220), dp(140)));
+            String cap = m.optString("caption", "");
+            if (!cap.isEmpty()) { TextView ct = Design.text(this, cap, 11.5f, Design.DIM(), Design.sans()); ct.setPadding(dp(2), dp(4), 0, 0); ct.setMaxLines(2); cell.addView(ct); }
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2); clp.rightMargin = dp(8); rowv.addView(cell, clp);
+        }
+        hs.addView(rowv); return hs;
+    }
+
+    private View trackList(final List<JSONObject> tracks) {
+        LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL);
+        col.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
+        for (int i = 0; i < tracks.size(); i++) {
+            JSONObject m = tracks.get(i); final String url = m.optString("url");
+            final String title = m.optString("caption", "").isEmpty() ? "Untitled track" : m.optString("caption");
+            LinearLayout r = row(); r.setPadding(dp(11), dp(11), dp(10), dp(11)); r.setClickable(true); Design.pressable(r);
+            r.setOnClickListener(v -> playTrack(url, title));
+            r.addView(Design.text(this, String.valueOf(i + 1), 12, Design.DIM(), Design.mono()), new LinearLayout.LayoutParams(dp(24), -2));
+            TextView tt = Design.text(this, title, 14, Design.INK(), Design.sansBold()); tt.setMaxLines(1); tt.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            r.addView(tt, new LinearLayout.LayoutParams(0, -2, 1));
+            r.addView(Design.text(this, "▶", 15, Design.ACCENT(), Design.sansBold()));
+            col.addView(r);
+            if (i < tracks.size() - 1) col.addView(Design.rule(this, 1), new LinearLayout.LayoutParams(-1, dp(1)));
+        }
+        return col;
+    }
+
+    /** Fullscreen swipeable carousel over a list of image items (‹ › + fling), caption underneath. */
+    private void openCarousel(final List<JSONObject> items, int start) {
+        if (items.isEmpty()) return;
+        final int[] idx = { Math.max(0, Math.min(start, items.size() - 1)) };
+        final Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+        FrameLayout root = new FrameLayout(this); root.setBackgroundColor(0xFF000000);
+        final ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        root.addView(img, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout top = new LinearLayout(this); top.setOrientation(LinearLayout.HORIZONTAL); top.setGravity(Gravity.CENTER_VERTICAL); top.setPadding(dp(16), dp(26), dp(16), dp(10));
+        final TextView counter = Design.text(this, "", 13, 0xFFFFFFFF, Design.mono()); top.addView(counter, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView close = Design.text(this, "✕", 20, 0xFFFFFFFF, Design.sansBold()); close.setPadding(dp(10), dp(4), dp(10), dp(4)); close.setOnClickListener(v -> d.dismiss()); top.addView(close);
+        root.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+
+        final TextView caption = Design.text(this, "", 14, 0xFFFFFFFF, Design.sans()); caption.setPadding(dp(16), dp(12), dp(16), dp(30)); caption.setBackgroundColor(0x99000000);
+        root.addView(caption, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+
+        final TextView prev = navArrow("‹"), next = navArrow("›");
+        FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(-2, -2, Gravity.START | Gravity.CENTER_VERTICAL); plp.leftMargin = dp(4); root.addView(prev, plp);
+        FrameLayout.LayoutParams nlp = new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.CENTER_VERTICAL); nlp.rightMargin = dp(4); root.addView(next, nlp);
+
+        final Runnable[] bind = new Runnable[1];
+        bind[0] = () -> {
+            JSONObject m = items.get(idx[0]); counter.setText((idx[0] + 1) + " / " + items.size());
+            String cap = m.optString("caption", ""); caption.setText(cap); caption.setVisibility(cap.isEmpty() ? View.GONE : View.VISIBLE);
+            ImageLoader.loadFull(this, m.optString("url"), img);
+            prev.setVisibility(idx[0] > 0 ? View.VISIBLE : View.INVISIBLE); next.setVisibility(idx[0] < items.size() - 1 ? View.VISIBLE : View.INVISIBLE);
+        };
+        prev.setOnClickListener(v -> { if (idx[0] > 0) { idx[0]--; bind[0].run(); } });
+        next.setOnClickListener(v -> { if (idx[0] < items.size() - 1) { idx[0]++; bind[0].run(); } });
+
+        final android.view.GestureDetector gd = new android.view.GestureDetector(this, new android.view.GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onFling(android.view.MotionEvent e1, android.view.MotionEvent e2, float vx, float vy) {
+                if (e1 == null || e2 == null) return false; float dx = e2.getX() - e1.getX();
+                if (Math.abs(dx) > dp(56) && Math.abs(dx) > Math.abs(e2.getY() - e1.getY())) {
+                    if (dx < 0) { if (idx[0] < items.size() - 1) { idx[0]++; bind[0].run(); } } else { if (idx[0] > 0) { idx[0]--; bind[0].run(); } }
+                    return true;
+                }
+                return false;
+            }
+        });
+        img.setClickable(true); img.setOnTouchListener((v, ev) -> gd.onTouchEvent(ev));
+        bind[0].run();
+        d.setContentView(root); d.show();
+    }
+
+    private TextView navArrow(String s) { TextView t = Design.text(this, s, 34, 0xFFFFFFFF, Design.sansBold()); t.setPadding(dp(14), dp(10), dp(14), dp(10)); t.setClickable(true); return t; }
+
+    /* ---------- persistent audio: a mini-player docked above the nav ---------- */
+
+    private void buildMiniPlayer() {
+        miniPlayer = new LinearLayout(this); miniPlayer.setOrientation(LinearLayout.VERTICAL);
+        miniPlayer.setBackgroundColor(Design.CARD()); miniPlayer.setVisibility(View.GONE);
+        miniPlayer.addView(Design.rule(this, 2), new LinearLayout.LayoutParams(-1, dp(2)));
+
+        miniBar = new SeekBar(this); miniBar.setMax(1000);
+        miniBar.getProgressDrawable().setColorFilter(Design.ACCENT(), android.graphics.PorterDuff.Mode.SRC_IN);
+        miniBar.getThumb().setColorFilter(Design.ACCENT(), android.graphics.PorterDuff.Mode.SRC_IN);
+        miniBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) { if (fromUser && audioDur() > 0) { try { audio.seekTo((int) (audioDur() * (p / 1000f))); } catch (Exception ignored) {} } }
+            public void onStartTrackingTouch(SeekBar s) { miniSeeking = true; }
+            public void onStopTrackingTouch(SeekBar s) { miniSeeking = false; }
+        });
+        miniPlayer.addView(miniBar, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout r = new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setGravity(Gravity.CENTER_VERTICAL); r.setPadding(dp(12), dp(2), dp(6), dp(6));
+        r.addView(Design.text(this, "♪", 18, Design.ACCENT(), Design.sansBold()), new LinearLayout.LayoutParams(dp(22), -2));
+        LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(7), 0, dp(6), 0);
+        miniTitle = Design.text(this, "", 13, Design.INK(), Design.sansBold()); miniTitle.setMaxLines(1); miniTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        miniTime = Design.text(this, "0:00", 10, Design.DIM(), Design.mono());
+        col.addView(miniTitle); col.addView(miniTime);
+        r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+        r.addView(miniIcon("⏪", () -> seekRel(-10000)));
+        miniPlay = miniIcon("❚❚", this::togglePlay); r.addView(miniPlay);
+        r.addView(miniIcon("⏩", () -> seekRel(10000)));
+        r.addView(miniIcon("✕", this::stopAudio));
+        miniPlayer.addView(r, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private TextView miniIcon(String s, Runnable click) {
+        TextView t = Design.text(this, s, 16, Design.INK(), Design.sansBold()); t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(10), dp(6), dp(10), dp(6)); t.setClickable(true); Design.pressable(t);
+        t.setOnClickListener(v -> click.run()); return t;
+    }
+
+    private int audioDur() { try { return audio == null ? 0 : audio.getDuration(); } catch (Exception e) { return 0; } }
+    private void seekRel(int ms) { if (audio == null) return; try { int d = audioDur(); int np = audio.getCurrentPosition() + ms; if (np < 0) np = 0; if (d > 0 && np > d) np = d; audio.seekTo(np); } catch (Exception ignored) {} }
+    private void togglePlay() { if (audio == null) return; try { if (audio.isPlaying()) audio.pause(); else audio.start(); updateMiniPlay(); } catch (Exception ignored) {} }
+    private void updateMiniPlay() { if (miniPlay == null) return; boolean playing = false; try { playing = audio != null && audio.isPlaying(); } catch (Exception ignored) {} miniPlay.setText(playing ? "❚❚" : "▶"); }
+
+    /** Start (or switch to) a track; it plays on regardless of screen changes,
+     *  controlled from the docked mini-player until you hit ✕. */
+    private void playTrack(String url, String title) {
         if (url == null || url.isEmpty()) return;
         stopAudio();
         final MediaPlayer mp = new MediaPlayer(); audio = mp;
-        final Handler handler = new Handler(Looper.getMainLooper());
-
-        Dialog d = new Dialog(this);
-        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(Design.blockShadow(this, Design.CARD())); box.setPadding(dp(18), dp(18), dp(18), dp(18));
-        box.addView(Design.text(this, "NOW PLAYING", 9f, Design.ACCENT(), Design.sansBold()));
-        box.addView(Design.text(this, title, 17, Design.INK(), Design.sansBold()), lp(0, 2, 0, 12));
-
-        final SeekBar bar = new SeekBar(this); bar.setMax(1000); bar.getProgressDrawable().setColorFilter(Design.ACCENT(), android.graphics.PorterDuff.Mode.SRC_IN); bar.getThumb().setColorFilter(Design.ACCENT(), android.graphics.PorterDuff.Mode.SRC_IN);
-        box.addView(bar, new LinearLayout.LayoutParams(-1, -2));
-        LinearLayout times = row();
-        final TextView cur = Design.text(this, "0:00", 11, Design.DIM(), Design.mono());
-        final TextView tot = Design.text(this, "–:--", 11, Design.DIM(), Design.mono()); tot.setGravity(Gravity.END);
-        times.addView(cur, new LinearLayout.LayoutParams(0, -2, 1)); times.addView(tot, new LinearLayout.LayoutParams(0, -2, 1));
-        box.addView(times, lp(0, 2, 0, 10));
-
-        final TextView playBtn = btn("❚❚ Pause", true, null);
-        LinearLayout controls = row();
-        controls.addView(btn("⏪ 10", false, () -> { if (mp.getDuration() > 0) mp.seekTo(Math.max(0, mp.getCurrentPosition() - 10000)); }), weight(46, 0, 4));
-        controls.addView(playBtn, weight(46, 4, 4));
-        controls.addView(btn("10 ⏩", false, () -> { if (mp.getDuration() > 0) mp.seekTo(Math.min(mp.getDuration(), mp.getCurrentPosition() + 10000)); }), weight(46, 4, 0));
-        box.addView(controls, lp(0, 0, 0, 8));
-        box.addView(btn("■ Stop", false, () -> { try { mp.pause(); mp.seekTo(0); } catch (Exception ignored) {} playBtn.setText("▶ Play"); }), lph(46, 0, 0, 0, 0));
-
-        playBtn.setOnClickListener(v -> { try { if (mp.isPlaying()) { mp.pause(); playBtn.setText("▶ Play"); } else { mp.start(); playBtn.setText("❚❚ Pause"); } } catch (Exception ignored) {} });
-
-        final Runnable[] tick = new Runnable[1];
-        tick[0] = () -> {
-            try { if (mp.getDuration() > 0) { bar.setProgress((int) (1000L * mp.getCurrentPosition() / mp.getDuration())); cur.setText(fmtTime(mp.getCurrentPosition())); } } catch (Exception ignored) {}
-            handler.postDelayed(tick[0], 500);
-        };
-        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar s, int p, boolean fromUser) { if (fromUser && mp.getDuration() > 0) mp.seekTo((int) (mp.getDuration() * (p / 1000f))); }
-            public void onStartTrackingTouch(SeekBar s) {} public void onStopTrackingTouch(SeekBar s) {}
-        });
-
+        miniTitle.setText(title); miniTime.setText("0:00"); miniBar.setProgress(0);
+        miniPlayer.setVisibility(View.VISIBLE); updateMiniPlay();
         try {
             mp.setDataSource(url);
-            mp.setOnPreparedListener(x -> { tot.setText(fmtTime(mp.getDuration())); mp.start(); playBtn.setText("❚❚ Pause"); handler.post(tick[0]); });
-            mp.setOnCompletionListener(x -> playBtn.setText("▶ Play"));
+            mp.setOnPreparedListener(x -> { mp.start(); updateMiniPlay(); startTicker(); });
+            mp.setOnCompletionListener(x -> { miniBar.setProgress(1000); updateMiniPlay(); });
+            mp.setOnErrorListener((m, w, e) -> { toast("Playback error"); stopAudio(); return true; });
             mp.prepareAsync();
-        } catch (Exception e) { toast("Couldn't play: " + e.getMessage()); }
+        } catch (Exception e) { toast("Couldn't play: " + e.getMessage()); stopAudio(); }
+    }
 
-        d.setContentView(box);
-        d.setOnDismissListener(x -> { handler.removeCallbacksAndMessages(null); stopAudio(); });
-        d.show();
+    private void startTicker() {
+        playback.removeCallbacksAndMessages(null);
+        final Runnable[] tick = new Runnable[1];
+        tick[0] = () -> {
+            try { int d = audioDur(); if (audio != null && d > 0) { if (!miniSeeking) miniBar.setProgress((int) (1000L * audio.getCurrentPosition() / d)); miniTime.setText(fmtTime(audio.getCurrentPosition()) + " / " + fmtTime(d)); } } catch (Exception ignored) {}
+            playback.postDelayed(tick[0], 500);
+        };
+        playback.post(tick[0]);
     }
 
     private String fmtTime(int ms) { int s = ms / 1000; return s / 60 + ":" + String.format("%02d", s % 60); }
 
-    private void stopAudio() { if (audio != null) { try { audio.release(); } catch (Exception ignored) {} audio = null; } }
+    private void stopAudio() {
+        playback.removeCallbacksAndMessages(null);
+        if (audio != null) { try { audio.release(); } catch (Exception ignored) {} audio = null; }
+        if (miniPlayer != null) miniPlayer.setVisibility(View.GONE);
+    }
 
     /** A real avatar (round-cornered photo) or, when none is set, a clean
      *  letter monogram — no auto-generated identicon. */
