@@ -157,7 +157,155 @@ public class MainActivity extends AppCompatActivity {
             SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
                     SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
             touchOwnRelay();   // refresh the 7-day TTL on any relay-hosted content
+            ensureTipAddress();
+            ensureMailKey();
+            scanTips();
+            scanMail();
         }
+    }
+
+    /** Capture the node's maxima public key once, to publish as msgpk (the DM identity). */
+    private void ensureMailKey() {
+        if (!SalonStore.get(this, "msgpk").isEmpty()) return;
+        node.cmd("maxima", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject r) {
+                JSONObject resp = r.optJSONObject("response");
+                String pk = resp == null ? "" : resp.optString("publickey", "");
+                if (!pk.isEmpty()) runOnUiThread(() -> SalonStore.put(MainActivity.this, "msgpk", pk));
+            }
+            @Override public void onError(String m) {}
+        });
+    }
+
+    /** Scan on-chain mail at our address; announce new DMs (v1 — Db + chat UI next). */
+    private void scanMail() {
+        final String addr = SalonStore.get(this, "tipaddr");
+        if (addr.isEmpty()) return;
+        MinimaMail.scan(node, addr, msgs -> runOnUiThread(() -> {
+            JSONArray seen = SalonStore.arr(MainActivity.this, "mailseen");
+            java.util.HashSet<String> seenSet = new java.util.HashSet<>();
+            for (int i = 0; i < seen.length(); i++) seenSet.add(seen.optString(i));
+            boolean baselined = "1".equals(SalonStore.get(MainActivity.this, "mailbaselined"));
+            java.util.List<String> fresh = new java.util.ArrayList<>();
+            for (MinimaMail.Msg m : msgs) {
+                if (m.coinid.isEmpty() || seenSet.contains(m.coinid)) continue;
+                seenSet.add(m.coinid); seen.put(m.coinid);
+                if (baselined) fresh.add("💬 @" + m.fromHandle.replaceFirst("^@", "") + ": " + (m.body.isEmpty() ? "[media]" : m.body));
+            }
+            SalonStore.setArr(MainActivity.this, "mailseen", seen);
+            if (!baselined) SalonStore.put(MainActivity.this, "mailbaselined", "1");
+            for (String d : fresh) toast(d);
+        }));
+    }
+
+    /** Pin a stable receiving address once (getaddress rotates keys), for tips.
+     *  Mirrors apks/openly/Identity.ensure — persist response.address, publish it. */
+    private void ensureTipAddress() {
+        if (!SalonStore.get(this, "tipaddr").isEmpty()) return;
+        node.cmd("getaddress", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject r) {
+                JSONObject resp = r.optJSONObject("response");
+                if (resp != null && !resp.optString("address", "").isEmpty())
+                    runOnUiThread(() -> SalonStore.put(MainActivity.this, "tipaddr", resp.optString("address")));
+            }
+            @Override public void onError(String m) {}
+        });
+    }
+
+    /** Detect inbound tips at our address and announce new ones. Baselines silently
+     *  on first run so old coins don't spam; thereafter new coinids → "X tipped you". */
+    private void scanTips() {
+        final String addr = SalonStore.get(this, "tipaddr");
+        if (addr.isEmpty()) return;
+        node.cmd("coinnotify action:add address:" + addr, new NodeApi.Cb() { public void onResult(JSONObject j) {} public void onError(String m) {} });
+        node.cmd("coins address:" + addr + " order:desc", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                final JSONArray arr = j.optJSONArray("response"); if (arr == null) return;
+                runOnUiThread(() -> {
+                    JSONArray seen = SalonStore.arr(MainActivity.this, "tipseen");
+                    java.util.HashSet<String> seenSet = new java.util.HashSet<>();
+                    for (int i = 0; i < seen.length(); i++) seenSet.add(seen.optString(i));
+                    boolean baselined = "1".equals(SalonStore.get(MainActivity.this, "tipbaselined"));
+                    java.util.List<String> fresh = new java.util.ArrayList<>();
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject c = arr.optJSONObject(i); if (c == null) continue;
+                        String cid = c.optString("coinid", ""); if (cid.isEmpty() || seenSet.contains(cid)) continue;
+                        seenSet.add(cid); seen.put(cid);
+                        if (baselined) fresh.add(describeTip(c));
+                    }
+                    SalonStore.setArr(MainActivity.this, "tipseen", seen);
+                    if (!baselined) SalonStore.put(MainActivity.this, "tipbaselined", "1");
+                    for (String d : fresh) toast(d);
+                });
+            }
+            @Override public void onError(String m) {}
+        });
+    }
+
+    private String describeTip(JSONObject coin) {
+        String amount = coin.optString("tokenamount", "");
+        if (amount.isEmpty()) amount = coin.optString("amount", "?");
+        String tokenid = coin.optString("tokenid", TipTransport.MINIMA);
+        String from = "someone", note = "";
+        JSONArray st = coin.optJSONArray("state");
+        if (st != null) for (int k = 0; k < st.length(); k++) {
+            JSONObject s = st.optJSONObject(k); if (s == null) continue;
+            int p = s.optInt("port", -1); String v = SalonRegistry.unhex(s.optString("data", ""));
+            if (p == 1 && !v.isEmpty()) from = v; else if (p == 2) note = v;
+        }
+        return "💰 @" + from.replaceFirst("^@", "") + " tipped you " + amount + " " + TipTransport.label(tokenid)
+                + (note.isEmpty() ? "" : " — " + note);
+    }
+
+    /* ---------------- tipping UI ---------------- */
+
+    private void tipDialog(String handle, String toAddr) {
+        if (!nodeUp) { toast("Connect the node to tip."); return; }
+        final String[] tokenid = { TipTransport.MXUSD };   // default dollar-pegged
+        LinearLayout box = dialogBox();
+        final TextView curBtn = Design.button(this, "Currency: mxUSD", false);
+        box.addView(curBtn, lph(46, 0, 2, 0, 8));
+        final EditText amount = field(box, "Amount", "", false, "1");
+        amount.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        final LinearLayout presets = row();
+        for (String amt : new String[]{"1", "5", "20"}) {
+            TextView pb = Design.button(this, "$" + amt, false);
+            pb.setOnClickListener(v -> amount.setText(amt));
+            presets.addView(pb, weight(40, 0, amt.equals("20") ? 0 : 6));
+        }
+        box.addView(presets, lp(0, 6, 0, 4));
+        final EditText note = field(box, "Note (optional)", "", false, "nice work!");
+        curBtn.setOnClickListener(v -> {
+            tokenid[0] = tokenid[0].equals(TipTransport.MXUSD) ? TipTransport.MINIMA : TipTransport.MXUSD;
+            curBtn.setText("Currency: " + TipTransport.label(tokenid[0]));
+            presets.setVisibility(tokenid[0].equals(TipTransport.MXUSD) ? View.VISIBLE : View.GONE);
+        });
+        new android.app.AlertDialog.Builder(this).setTitle("Send a tip to @" + handle).setView(box)
+                .setPositiveButton("Send", (d, w) -> sendTip(handle, toAddr, tokenid[0], text(amount).trim(), text(note).trim()))
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private void sendTip(String handle, String toAddr, String tokenid, String amount, String note) {
+        double amt;
+        try { amt = Double.parseDouble(amount); } catch (Exception e) { toast("Enter a valid amount."); return; }
+        if (amt <= 0) { toast("Enter an amount."); return; }
+        toast("Checking balance…");
+        node.cmd("balance tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                double sendable = 0;
+                try { JSONArray a = j.optJSONArray("response"); if (a != null && a.length() > 0) sendable = a.optJSONObject(0).optDouble("sendable", 0); } catch (Exception ignored) {}
+                final double have = sendable;
+                runOnUiThread(() -> {
+                    if (amt > have) { toast("Not enough " + TipTransport.label(tokenid) + " (you have " + have + ")"); return; }
+                    toast("Sending tip…");
+                    TipTransport.tip(node, toAddr, amount, tokenid, "@" + SalonStore.get(MainActivity.this, "handle"), note, new TipTransport.Cb() {
+                        @Override public void onSent(String txpowid) { runOnUiThread(() -> toast("Tip sent to @" + handle + " — mining ⛏")); }
+                        @Override public void onFailed(String msg) { runOnUiThread(() -> toast("Tip failed: " + msg)); }
+                    });
+                });
+            }
+            @Override public void onError(String m) { runOnUiThread(() -> toast("Balance check failed: " + m)); }
+        });
     }
 
     /** GET-touch the owner's own relay blobs so their 7-day TTL resets each session. */
@@ -234,7 +382,7 @@ public class MainActivity extends AppCompatActivity {
     private JSONObject buildProfileJson() {
         JSONObject me = SalonStore.me(this), p = new JSONObject();
         putJson(p, "v", "1");
-        for (String k : new String[]{"handle","name","bio","about","avatar","banner","tokenid","webvalidate"})
+        for (String k : new String[]{"handle","name","bio","about","avatar","banner","tokenid","webvalidate","tipaddr","msgpk"})
             putJson(p, k, me.optString(k, ""));
         putJson(p, "updated", Long.toString(System.currentTimeMillis() / 1000));
         try {
@@ -392,8 +540,14 @@ public class MainActivity extends AppCompatActivity {
             else SalonStore.follow(this, viewEntry.tokenid, viewEntry.handle, viewEntry.url);
             render();
         }), weight(40, 4, 0));
-        body.addView(bar, lp(0, 0, 0, 10));
+        body.addView(bar, lp(0, 0, 0, 8));
         if (viewProfile == null) { body.addView(Design.note(this, "Loading @" + viewEntry.handle + "'s page…"), lp(0, 0, 0, 12)); return; }
+        String tipAddr = viewProfile.optString("tipaddr", "");
+        if (!tipAddr.isEmpty()) {
+            LinearLayout tipRow = row();
+            tipRow.addView(btn("💰 Tip @" + viewEntry.handle, true, () -> tipDialog(viewEntry.handle, tipAddr)), weight(46, 0, 0));
+            body.addView(tipRow, lp(0, 0, 0, 10));
+        }
         renderProfilePage(viewProfile, false);
     }
 
@@ -1124,6 +1278,8 @@ public class MainActivity extends AppCompatActivity {
             LinearLayout idc = card(); idc.addView(Design.lot(this, "Identity"));
             copyRow(idc, "Handle", "@" + SalonStore.get(this, "handle"));
             copyRow(idc, "Token", SalonStore.get(this, "tokenid"));
+            String tipaddr = SalonStore.get(this, "tipaddr");
+            if (!tipaddr.isEmpty()) copyRow(idc, "Tip address", tipaddr);
             idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Burn spare identity token", false, this::burnSpares), lph(44, 0, 8, 0, 0));
             body.addView(idc, lp(0, 0, 0, 12));
