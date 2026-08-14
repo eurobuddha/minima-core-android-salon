@@ -439,8 +439,74 @@ public class MainActivity extends AppCompatActivity {
         pendingSaveText = content;
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("text/plain").putExtra(Intent.EXTRA_TITLE, suggestedName);
-        try { startActivityForResult(i, SAVE_MSGKEY); }
+        try { startActivityForResult(i, SAVE_TEXT); }
         catch (Exception e) { pendingSaveText = null; toast("No file app to save with."); }
+    }
+
+    /** A full account backup file: messaging key + hosting logins (+ identity/content
+     *  draft). Secrets are stored DECRYPTED here (Crypt is per-install and useless after
+     *  a reinstall) and re-wrapped with this device's key on restore. Guard the file. */
+    private String buildBackupJson() {
+        JSONObject b = new JSONObject();
+        try {
+            b.put("salonBackup", 1);
+            b.put("created", System.currentTimeMillis() / 1000);
+            JSONObject me = new JSONObject(SalonStore.me(this).toString());
+            me.remove("msgseed");   // device-bound; exported separately as plaintext
+            b.put("me", me);
+            String seed = SalonComms.exportSeed(this);
+            if (!seed.isEmpty()) b.put("msgseed", seed);
+            JSONArray hosts = new JSONArray();
+            for (Hosting.Profile p : HostingStore.list(this)) {
+                JSONObject copy = new JSONObject(p.j.toString());
+                JSONObject cfg = copy.optJSONObject(copy.optString("type"));
+                if (cfg != null) for (String sf : HostingStore.SECRET_FIELDS) {
+                    String enc = cfg.optString(sf, "");
+                    if (!enc.isEmpty()) cfg.put(sf, Crypt.decrypt(enc));
+                }
+                hosts.put(copy);
+            }
+            b.put("hosting", hosts);
+        } catch (Exception ignored) {}
+        return b.toString();
+    }
+
+    private void restoreFromFile() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        try { startActivityForResult(i, OPEN_BACKUP); }
+        catch (Exception e) { toast("No file app to open with."); }
+    }
+
+    /** Restore an account backup: re-wrap hosting secrets with this device's Crypt key,
+     *  import the messaging seed, and (only if empty) seed the identity/content draft. */
+    private void restoreFromBackup(String json) {
+        try {
+            JSONObject b = new JSONObject(json);
+            if (b.optInt("salonBackup", 0) != 1) { runOnUiThread(() -> toast("Not a Salon backup file.")); return; }
+            JSONObject me = b.optJSONObject("me");
+            if (me != null && !SalonStore.hasIdentity(this)) {   // don't clobber a live identity
+                JSONObject keepMsg = SalonStore.me(this);
+                if (keepMsg.has("msgseed")) try { me.put("msgseed", keepMsg.optString("msgseed")); } catch (Exception ignored) {}
+                SalonStore.save(this, me);
+            }
+            int hostN = 0;
+            JSONArray hosts = b.optJSONArray("hosting");
+            if (hosts != null) for (int i = 0; i < hosts.length(); i++) {
+                JSONObject o = hosts.optJSONObject(i); if (o == null) continue;
+                JSONObject cfg = o.optJSONObject(o.optString("type"));
+                if (cfg != null) for (String sf : HostingStore.SECRET_FIELDS) {
+                    String plain = cfg.optString(sf, "");
+                    if (!plain.isEmpty()) cfg.put(sf, Crypt.encrypt(plain));
+                }
+                HostingStore.upsert(this, new Hosting.Profile(o));
+                hostN++;
+            }
+            boolean msgOk = false;
+            String seed = b.optString("msgseed", "");
+            if (!seed.isEmpty() && SalonComms.importSeed(this, seed)) { SalonStore.put(this, "msgpk", SalonComms.publicId(this)); msgOk = true; }
+            final int hn = hostN; final boolean mo = msgOk;
+            runOnUiThread(() -> { toast("Restored " + hn + " destination" + (hn == 1 ? "" : "s") + (mo ? " + messaging key." : ".")); render(); });
+        } catch (Exception e) { runOnUiThread(() -> toast("Restore failed: " + e.getMessage())); }
     }
 
     private void restoreMsgKey() {
@@ -999,7 +1065,7 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================= media: pick / upload / play ================= */
 
-    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45, PICK_DM_IMG = 46, SAVE_MSGKEY = 51;
+    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45, PICK_DM_IMG = 46, SAVE_TEXT = 51, OPEN_BACKUP = 52;
     private String pendingSaveText;   // content queued for a SAF "Save file" (ACTION_CREATE_DOCUMENT)
 
     private void pickMedia(int code, String mime) {
@@ -1013,14 +1079,25 @@ public class MainActivity extends AppCompatActivity {
         if (res != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
         final int r = req;
-        if (r == SAVE_MSGKEY) {   // write the queued text to the user-chosen file
+        if (r == SAVE_TEXT) {   // write the queued text to the user-chosen file
             final String content = pendingSaveText; pendingSaveText = null;
             if (content == null) return;
             io.execute(() -> {
                 try (java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
                     os.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8)); os.flush();
-                    runOnUiThread(() -> toast("Saved. Keep this file safe — it unlocks your DMs."));
+                    runOnUiThread(() -> toast("Saved. Keep this file safe — it holds your credentials."));
                 } catch (Exception e) { runOnUiThread(() -> toast("Save failed: " + e.getMessage())); }
+            });
+            return;
+        }
+        if (r == OPEN_BACKUP) {   // read + restore an account backup file
+            io.execute(() -> {
+                try (java.io.InputStream is = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[8192]; int n;
+                    while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+                    restoreFromBackup(new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception e) { runOnUiThread(() -> toast("Couldn't read file: " + e.getMessage())); }
             });
             return;
         }
@@ -1584,6 +1661,12 @@ public class MainActivity extends AppCompatActivity {
         addKvPlain(hostCard, "Default", def == null ? "none yet" : def.name() + " · " + def.type());
         hostCard.addView(btn("Manage destinations", true, () -> go(Screen.HOSTING)), lph(48, 0, 8, 0, 0));
         body.addView(hostCard, lp(0, 0, 0, 12));
+
+        LinearLayout bkp = card(); bkp.addView(Design.lot(this, "Backup & restore"));
+        bkp.addView(Design.note(this, "Save your messaging key + hosting logins to one file. After a reinstall, Restore brings them back — then your page content restores from hosting. Keep the file safe: it holds your credentials in the clear."), lp(0, 4, 0, 6));
+        bkp.addView(btn("Back up to file", true, () -> saveTextFile("salon-backup.json", buildBackupJson())), lph(48, 0, 6, 0, 0));
+        bkp.addView(btn("Restore from file", false, this::restoreFromFile), lph(44, 0, 8, 0, 0));
+        body.addView(bkp, lp(0, 0, 0, 12));
         if (SalonStore.hasIdentity(this)) {
             LinearLayout idc = card(); idc.addView(Design.lot(this, "Identity"));
             copyRow(idc, "Handle", "@" + SalonStore.get(this, "handle"));
