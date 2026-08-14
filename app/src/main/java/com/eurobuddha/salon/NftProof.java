@@ -118,6 +118,19 @@ final class NftProof {
         return "";
     }
 
+    /** Per-edition image for a StateNFT coin: the embedded state art if present, else the
+     *  hosted URL-mode image {@code base + index + ext} (index = state port 0), else "".
+     *  Mirrors Atelier StateNft.imageUrl so both embed- and url-mode collections render. */
+    static String editionImageUrl(JSONObject coin, String base, String ext) {
+        String emb = stateImageUri(coin);
+        if (!emb.isEmpty()) return emb;
+        if (base != null && !base.isEmpty()) {
+            String idx = state(coin, 0);
+            if (idx != null && idx.matches("[0-9]+")) return base + idx + (ext == null || ext.isEmpty() ? ".png" : ext);
+        }
+        return "";
+    }
+
     /** Read a coin's state variable at {@code port} (array or object form). */
     static String state(JSONObject coin, int port) {
         Object raw = coin == null ? null : coin.opt("state");
