@@ -158,11 +158,25 @@ public class MainActivity extends AppCompatActivity {
             SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
                     SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
             touchOwnRelay();   // refresh the 7-day TTL on any relay-hosted content
-            ensureTipAddress();
             ensureMailKey();
-            scanTips();
-            scanMail();
+            ensureInboxAndScan();
         }
+    }
+
+    /** Scan the inbox (tips + DMs) — but only once the tip address is captured. On a fresh
+     *  identity getaddress is async, so we scan INSIDE its callback (fixes the race where a
+     *  new device never scanned because tipaddr was still empty). */
+    private void ensureInboxAndScan() {
+        String addr = SalonStore.get(this, "tipaddr");
+        if (!addr.isEmpty()) { scanTips(); scanMail(); return; }
+        node.cmd("getaddress", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject r) {
+                JSONObject resp = r.optJSONObject("response");
+                String a = resp == null ? "" : resp.optString("address", "");
+                if (!a.isEmpty()) runOnUiThread(() -> { SalonStore.put(MainActivity.this, "tipaddr", a); scanTips(); scanMail(); });
+            }
+            @Override public void onError(String m) {}
+        });
     }
 
     /** Derive our app-side messaging identity once (libsodium, no node/Maxima) and publish
@@ -181,37 +195,21 @@ public class MainActivity extends AppCompatActivity {
         if (addr.isEmpty()) return;
         MinimaMail.scan(node, SalonComms.crypto(this), addr, msgs -> runOnUiThread(() -> {
             MailDb db = MailDb.get(MainActivity.this);
-            boolean baselined = "1".equals(SalonStore.get(MainActivity.this, "mailbaselined"));
             int newCount = 0; String lastFrom = "", lastBody = "";
             for (MinimaMail.Msg m : msgs) {
                 if (m.coinid.isEmpty()) continue;
                 String preview = !m.body.isEmpty() ? m.body : (!m.mediaRef.isEmpty() ? "📎 media" : "");
                 boolean isNew = db.insert(m.coinid, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
                 if (isNew) {
-                    db.upsertContact(m.fromPublicId, m.fromHandle, "", m.fromAddr, preview, m.ts, baselined && !m.fromPublicId.equals(threadPeer));
-                    if (baselined) { newCount++; lastFrom = m.fromHandle; lastBody = preview; }
+                    db.upsertContact(m.fromPublicId, m.fromHandle, "", m.fromAddr, preview, m.ts, !m.fromPublicId.equals(threadPeer));
+                    newCount++; lastFrom = m.fromHandle; lastBody = preview;
                 }
             }
-            if (!baselined) SalonStore.put(MainActivity.this, "mailbaselined", "1");
             if (newCount > 0) {
                 if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
                 else { buildNav(); toast("💬 " + (newCount == 1 ? "@" + lastFrom.replaceFirst("^@", "") + ": " + lastBody : newCount + " new messages")); }
             }
         }));
-    }
-
-    /** Pin a stable receiving address once (getaddress rotates keys), for tips.
-     *  Mirrors apks/openly/Identity.ensure — persist response.address, publish it. */
-    private void ensureTipAddress() {
-        if (!SalonStore.get(this, "tipaddr").isEmpty()) return;
-        node.cmd("getaddress", new NodeApi.Cb() {
-            @Override public void onResult(JSONObject r) {
-                JSONObject resp = r.optJSONObject("response");
-                if (resp != null && !resp.optString("address", "").isEmpty())
-                    runOnUiThread(() -> SalonStore.put(MainActivity.this, "tipaddr", resp.optString("address")));
-            }
-            @Override public void onError(String m) {}
-        });
     }
 
     /** Detect inbound tips at our address and announce new ones. Baselines silently
