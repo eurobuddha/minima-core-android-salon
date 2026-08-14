@@ -9,101 +9,84 @@ import java.util.List;
 
 /**
  * Direct messages over MINIMA MAIL — fully on-chain, no chat server (so no UK
- * user-to-user-service exposure). A DM is a real coin sent to the recipient's
- * address with the message ENCRYPTED (and signed) into coin state[99] by the
- * node's built-in {@code maxmessage} (a LOCAL keypair op — not the Maxima network).
- * The recipient scans coins at their own address and {@code maxmessage decrypt}s each
- * state[99]; only their node can open it. Mirrors {@code mds/chainmail} (txns.js /
- * service.js), but sent to the recipient's own address so tips + DMs share one inbox
- * scan. Large media stays on the encrypted relay; only its small sealed manifest
- * rides in the message JSON.
+ * user-to-user-service exposure). A DM is a real coin sent to the recipient's address
+ * with the message SEALED in-app (libsodium {@link LocalEcCryptoProvider}, NOT Maxima,
+ * NOT node crypto) into coin state[99]. The recipient scans coins at their own address
+ * and opens each state[99] IN-APP — one {@code coins} call, no per-message node crypto.
+ * Only their box key opens the seal; an embedded Ed25519 signature authenticates the
+ * sender. Large media stays on the encrypted relay; only its sealed manifest rides in
+ * the message JSON. Idea mirrors mds/chainmail, transport = plain on-chain send.
  */
 final class MinimaMail {
 
-    static final String AMOUNT = "0.001";   // dust carrier, like chainmail
+    static final String AMOUNT = "0.001";   // dust carrier
 
     interface Cb { void onSent(String txpowid); void onFailed(String message); }
     interface Scanned { void onMessages(List<Msg> messages); }
 
-    /** A decrypted inbound DM. */
+    /** A decrypted inbound DM. {@code fromPublicId} is cryptographically verified; {@code fromHandle}
+     *  is the display name inside the (signed) payload. */
     static final class Msg {
-        final String coinid, fromHandle, body, mediaRef, mediaMime;
-        final long ts;
-        Msg(String coinid, String fromHandle, String body, String mediaRef, String mediaMime, long ts) {
-            this.coinid = coinid; this.fromHandle = fromHandle; this.body = body;
-            this.mediaRef = mediaRef; this.mediaMime = mediaMime; this.ts = ts;
+        final String coinid, fromPublicId, fromHandle, body, mediaRef, mediaMime;
+        final long ts; final boolean valid;
+        Msg(String coinid, String fromPublicId, String fromHandle, String body, String mediaRef, String mediaMime, long ts, boolean valid) {
+            this.coinid = coinid; this.fromPublicId = fromPublicId; this.fromHandle = fromHandle;
+            this.body = body; this.mediaRef = mediaRef; this.mediaMime = mediaMime; this.ts = ts; this.valid = valid;
         }
     }
 
-    /** Encrypt {@code message} to the recipient's maxima public key and send it as a
-     *  coin to their address. */
-    static void send(final NodeApi node, final String toAddress, final String toPublicKey,
-                     final JSONObject message, final Cb cb) {
+    /** Seal {@code message} in-app to {@code toPublicId} (recipient msgpk) and send it as a
+     *  coin to {@code toAddress}. */
+    static void send(final NodeApi node, final LocalEcCryptoProvider crypto, final String toAddress,
+                     final String toPublicId, final JSONObject message, final Cb cb) {
+        final String sealedHex;
         try {
-            String hexdata = Hex.to(message.toString().getBytes(StandardCharsets.UTF_8));
-            node.cmd("maxmessage action:encrypt publickey:" + toPublicKey + " data:" + hexdata, new NodeApi.Cb() {
-                @Override public void onResult(JSONObject enc) {
-                    if (!enc.optBoolean("status", false)) { cb.onFailed("encrypt failed — bad recipient key?"); return; }
-                    JSONObject r = enc.optJSONObject("response");
-                    String sealed = r == null ? "" : r.optString("data", "");
-                    if (sealed.isEmpty()) { cb.onFailed("encrypt returned nothing"); return; }
-                    String state = "{\"99\":\"" + sealed + "\"}";
-                    node.cmd("send amount:" + AMOUNT + " address:" + toAddress + " state:" + state, new NodeApi.Cb() {
-                        @Override public void onResult(JSONObject j) {
-                            if (j.optBoolean("status", false) || j.optBoolean("pending", false)) {
-                                JSONObject rr = j.optJSONObject("response");
-                                cb.onSent(rr != null ? rr.optString("txpowid", "") : "");
-                            } else cb.onFailed(j.optString("error", "the node rejected the message"));
-                        }
-                        @Override public void onError(String m) { cb.onFailed(m); }
-                    });
-                }
-                @Override public void onError(String m) { cb.onFailed(m); }
-            });
-        } catch (Exception e) { cb.onFailed(e.getMessage()); }
+            sealedHex = crypto.seal(toPublicId, message.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) { cb.onFailed("encrypt failed — bad recipient key? " + e.getMessage()); return; }
+        String state = "{\"99\":\"0x" + sealedHex + "\"}";
+        node.cmd("send amount:" + AMOUNT + " address:" + toAddress + " state:" + state, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                if (j.optBoolean("status", false) || j.optBoolean("pending", false)) {
+                    JSONObject r = j.optJSONObject("response");
+                    cb.onSent(r != null ? r.optString("txpowid", "") : "");
+                } else cb.onFailed(j.optString("error", "the node rejected the message"));
+            }
+            @Override public void onError(String m) { cb.onFailed(m); }
+        });
     }
 
-    /** Scan coins at {@code myAddress}, maxmessage-decrypt each state[99], and return the
-     *  DMs that opened (skipping tips / coins not for us). Runs several node calls. */
-    static void scan(final NodeApi node, final String myAddress, final Scanned cb) {
+    /** Scan coins at {@code myAddress} and open each state[99] in-app; returns the DMs for me. */
+    static void scan(final NodeApi node, final LocalEcCryptoProvider crypto, final String myAddress, final Scanned cb) {
         node.cmd("coins address:" + myAddress + " order:desc", new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
+                List<Msg> out = new ArrayList<>();
                 JSONArray arr = j.optJSONArray("response");
-                final List<String[]> pending = new ArrayList<>();   // {coinid, sealedState99}
                 if (arr != null) for (int i = 0; i < arr.length(); i++) {
                     JSONObject c = arr.optJSONObject(i); if (c == null) continue;
-                    String s99 = state99(c); String cid = c.optString("coinid", "");
-                    if (!s99.isEmpty() && !cid.isEmpty()) pending.add(new String[]{cid, s99});
+                    String cid = c.optString("coinid", ""); String s99 = state99(c);
+                    if (cid.isEmpty() || s99.isEmpty()) continue;
+                    String hex = (s99.startsWith("0x") || s99.startsWith("0X")) ? s99.substring(2) : s99;
+                    Opened o = crypto.open(hex);
+                    if (o == null) continue;   // not for me / not a DM
+                    try {
+                        JSONObject m = new JSONObject(new String(o.plaintext, StandardCharsets.UTF_8));
+                        out.add(new Msg(cid, o.fromPublicId, m.optString("from", "someone"), m.optString("body", ""),
+                                m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid));
+                    } catch (Exception ignored) {}
                 }
-                decryptNext(node, pending, 0, new ArrayList<>(), cb);
+                cb.onMessages(out);
             }
             @Override public void onError(String m) { cb.onMessages(new ArrayList<>()); }
         });
     }
 
-    private static void decryptNext(final NodeApi node, final List<String[]> pending, final int i,
-                                    final List<Msg> out, final Scanned cb) {
-        if (i >= pending.size()) { cb.onMessages(out); return; }
-        final String coinid = pending.get(i)[0], sealed = pending.get(i)[1];
-        node.cmd("maxmessage action:decrypt data:" + sealed, new NodeApi.Cb() {
-            @Override public void onResult(JSONObject dec) {
-                try {
-                    if (dec.optBoolean("status", false)) {
-                        JSONObject m = dec.optJSONObject("response");
-                        JSONObject inner = m == null ? null : m.optJSONObject("message");
-                        if (inner != null && inner.optBoolean("valid", false)) {
-                            String hex = inner.optString("data", "");
-                            String jsonStr = new String(Hex.from(hex), StandardCharsets.UTF_8);
-                            JSONObject msg = new JSONObject(jsonStr);
-                            out.add(new Msg(coinid, msg.optString("from", "someone"), msg.optString("body", ""),
-                                    msg.optString("media", ""), msg.optString("mime", ""), msg.optLong("ts", 0)));
-                        }
-                    }
-                } catch (Exception ignored) {}
-                decryptNext(node, pending, i + 1, out, cb);
-            }
-            @Override public void onError(String mm) { decryptNext(node, pending, i + 1, out, cb); }
-        });
+    static JSONObject compose(String fromHandle, String body, String mediaRef, String mediaMime, long ts) {
+        JSONObject m = new JSONObject();
+        try {
+            m.put("v", 1); m.put("from", fromHandle); m.put("body", body == null ? "" : body); m.put("ts", ts);
+            if (mediaRef != null && !mediaRef.isEmpty()) { m.put("media", mediaRef); m.put("mime", mediaMime == null ? "" : mediaMime); }
+        } catch (Exception ignored) {}
+        return m;
     }
 
     private static String state99(JSONObject coin) {
@@ -113,16 +96,6 @@ final class MinimaMail {
             if (s != null && s.optInt("port", -1) == 99) return s.optString("data", "");
         }
         return "";
-    }
-
-    /** Build the message JSON to seal. */
-    static JSONObject compose(String fromHandle, String body, String mediaRef, String mediaMime, long ts) {
-        JSONObject m = new JSONObject();
-        try {
-            m.put("v", 1); m.put("from", fromHandle); m.put("body", body == null ? "" : body); m.put("ts", ts);
-            if (mediaRef != null && !mediaRef.isEmpty()) { m.put("media", mediaRef); m.put("mime", mediaMime == null ? "" : mediaMime); }
-        } catch (Exception ignored) {}
-        return m;
     }
 
     private MinimaMail() {}

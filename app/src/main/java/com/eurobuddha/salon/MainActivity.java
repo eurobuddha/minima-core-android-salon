@@ -164,16 +164,13 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Capture the node's maxima public key once, to publish as msgpk (the DM identity). */
+    /** Derive our app-side messaging identity once (libsodium, no node/Maxima) and publish
+     *  its public id as msgpk so others can seal DMs to us. */
     private void ensureMailKey() {
         if (!SalonStore.get(this, "msgpk").isEmpty()) return;
-        node.cmd("maxima", new NodeApi.Cb() {
-            @Override public void onResult(JSONObject r) {
-                JSONObject resp = r.optJSONObject("response");
-                String pk = resp == null ? "" : resp.optString("publickey", "");
-                if (!pk.isEmpty()) runOnUiThread(() -> SalonStore.put(MainActivity.this, "msgpk", pk));
-            }
-            @Override public void onError(String m) {}
+        io.execute(() -> {
+            String pk = SalonComms.publicId(MainActivity.this);   // generates+stores the seed if absent
+            runOnUiThread(() -> SalonStore.put(MainActivity.this, "msgpk", pk));
         });
     }
 
@@ -181,7 +178,7 @@ public class MainActivity extends AppCompatActivity {
     private void scanMail() {
         final String addr = SalonStore.get(this, "tipaddr");
         if (addr.isEmpty()) return;
-        MinimaMail.scan(node, addr, msgs -> runOnUiThread(() -> {
+        MinimaMail.scan(node, SalonComms.crypto(this), addr, msgs -> runOnUiThread(() -> {
             JSONArray seen = SalonStore.arr(MainActivity.this, "mailseen");
             java.util.HashSet<String> seenSet = new java.util.HashSet<>();
             for (int i = 0; i < seen.length(); i++) seenSet.add(seen.optString(i));
