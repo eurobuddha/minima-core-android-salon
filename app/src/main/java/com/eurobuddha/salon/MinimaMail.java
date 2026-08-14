@@ -39,6 +39,7 @@ final class MinimaMail {
      *  coin to {@code toAddress}. */
     static void send(final NodeApi node, final LocalEcCryptoProvider crypto, final String toAddress,
                      final String toPublicId, final JSONObject message, final Cb cb) {
+        if (!Args.isAddr(toAddress)) { cb.onFailed("recipient address is malformed — not sending"); return; }
         final String sealedHex;
         try {
             sealedHex = crypto.seal(toPublicId, message.toString().getBytes(StandardCharsets.UTF_8));
@@ -57,7 +58,7 @@ final class MinimaMail {
 
     /** Scan coins at {@code myAddress} and open each state[99] in-app; returns the DMs for me. */
     static void scan(final NodeApi node, final LocalEcCryptoProvider crypto, final String myAddress, final Scanned cb) {
-        node.cmd("coins address:" + myAddress + " order:desc", new NodeApi.Cb() {
+        node.cmd("coins address:" + myAddress + " order:desc depth:200", new NodeApi.Cb() {   // bounded: address is public, guard against dust-flood overflow
             @Override public void onResult(JSONObject j) {
                 List<Msg> out = new ArrayList<>();
                 JSONArray arr = j.optJSONArray("response");

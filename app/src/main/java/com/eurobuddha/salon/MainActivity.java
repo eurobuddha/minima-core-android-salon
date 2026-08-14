@@ -208,6 +208,7 @@ public class MainActivity extends AppCompatActivity {
             int newCount = 0; String lastFrom = "", lastBody = "";
             for (MinimaMail.Msg m : msgs) {
                 if (m.coinid.isEmpty()) continue;
+                if (!m.valid) continue;   // anonymous seal — drop messages whose sender signature doesn't verify (anti-impersonation)
                 String preview = !m.body.isEmpty() ? m.body : (!m.mediaRef.isEmpty() ? "📎 media" : "");
                 boolean isNew = db.insert(m.coinid, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
                 if (isNew) {
@@ -228,7 +229,7 @@ public class MainActivity extends AppCompatActivity {
         final String addr = SalonStore.get(this, "tipaddr");
         if (addr.isEmpty()) return;
         node.cmd("coinnotify action:add address:" + addr, new NodeApi.Cb() { public void onResult(JSONObject j) {} public void onError(String m) {} });
-        node.cmd("coins address:" + addr + " order:desc", new NodeApi.Cb() {
+        node.cmd("coins address:" + addr + " order:desc depth:200", new NodeApi.Cb() {   // bounded: the tip address is public and could be dust-flooded
             @Override public void onResult(JSONObject j) {
                 final JSONArray arr = j.optJSONArray("response"); if (arr == null) return;
                 runOnUiThread(() -> {
@@ -243,7 +244,7 @@ public class MainActivity extends AppCompatActivity {
                         seenSet.add(cid); seen.put(cid);
                         if (baselined) fresh.add(describeTip(c));
                     }
-                    SalonStore.setArr(MainActivity.this, "tipseen", seen);
+                    SalonStore.setArr(MainActivity.this, "tipseen", capArr(seen, 500));
                     if (!baselined) SalonStore.put(MainActivity.this, "tipbaselined", "1");
                     for (String d : fresh) toast(d);
                 });
@@ -265,6 +266,14 @@ public class MainActivity extends AppCompatActivity {
         }
         return "💰 @" + from.replaceFirst("^@", "") + " tipped you " + amount + " " + TipTransport.label(tokenid)
                 + (note.isEmpty() ? "" : " — " + note);
+    }
+
+    /** Keep only the most-recent {@code max} entries of a persisted seen-id list (unbounded growth guard). */
+    private static JSONArray capArr(JSONArray a, int max) {
+        if (a == null || a.length() <= max) return a;
+        JSONArray out = new JSONArray();
+        for (int i = a.length() - max; i < a.length(); i++) out.put(a.opt(i));
+        return out;
     }
 
     /* ---------------- tipping UI ---------------- */
@@ -296,17 +305,19 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void sendTip(String handle, String toAddr, String tokenid, String amount, String note) {
-        double amt;
-        try { amt = Double.parseDouble(amount); } catch (Exception e) { toast("Enter a valid amount."); return; }
-        if (amt <= 0) { toast("Enter an amount."); return; }
+        if (!Args.isDecimal(amount)) { toast("Enter a valid amount."); return; }
+        final java.math.BigDecimal amt;
+        try { amt = new java.math.BigDecimal(amount); } catch (Exception e) { toast("Enter a valid amount."); return; }
+        if (amt.signum() <= 0) { toast("Enter an amount."); return; }
         toast("Checking balance…");
         node.cmd("balance tokenid:" + tokenid, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
-                double sendable = 0;
-                try { JSONArray a = j.optJSONArray("response"); if (a != null && a.length() > 0) sendable = a.optJSONObject(0).optDouble("sendable", 0); } catch (Exception ignored) {}
-                final double have = sendable;
+                String sendable = "0";
+                try { JSONArray a = j.optJSONArray("response"); if (a != null && a.length() > 0) sendable = a.optJSONObject(0).optString("sendable", "0"); } catch (Exception ignored) {}
+                java.math.BigDecimal haveBd; try { haveBd = new java.math.BigDecimal(sendable); } catch (Exception e) { haveBd = java.math.BigDecimal.ZERO; }
+                final java.math.BigDecimal have = haveBd;
                 runOnUiThread(() -> {
-                    if (amt > have) { toast("Not enough " + TipTransport.label(tokenid) + " (you have " + have + ")"); return; }
+                    if (amt.compareTo(have) > 0) { toast("Not enough " + TipTransport.label(tokenid) + " (you have " + have.toPlainString() + ")"); return; }
                     toast("Sending tip…");
                     TipTransport.tip(node, toAddr, amount, tokenid, "@" + SalonStore.get(MainActivity.this, "handle"), note, new TipTransport.Cb() {
                         @Override public void onSent(String txpowid) { runOnUiThread(() -> toast("Tip sent to @" + handle + " — mining ⛏")); }
@@ -508,11 +519,19 @@ public class MainActivity extends AppCompatActivity {
                 HostingStore.upsert(this, new Hosting.Profile(o));
                 hostN++;
             }
-            boolean msgOk = false;
+            boolean msgOk = false, seedKept = false;
             String seed = b.optString("msgseed", "");
-            if (!seed.isEmpty() && SalonComms.importSeed(this, seed)) { SalonStore.put(this, "msgpk", SalonComms.publicId(this)); msgOk = true; }
-            final int hn = hostN; final boolean mo = msgOk;
-            runOnUiThread(() -> { toast("Restored " + hn + " destination" + (hn == 1 ? "" : "s") + (mo ? " + messaging key." : ".")); render(); });
+            if (!seed.isEmpty()) {
+                boolean activeInbox = !MailDb.get(this).contacts().isEmpty();
+                if (activeInbox && !seed.equalsIgnoreCase(SalonComms.exportSeed(this))) {
+                    seedKept = true;   // never silently replace a key that has a live inbox
+                } else if (SalonComms.importSeed(this, seed)) {
+                    SalonStore.put(this, "msgpk", SalonComms.publicId(this)); msgOk = true;
+                }
+            }
+            final int hn = hostN; final boolean mo = msgOk, sk = seedKept;
+            runOnUiThread(() -> { toast("Restored " + hn + " destination" + (hn == 1 ? "" : "s") + (mo ? " + messaging key." : ".")
+                    + (sk ? " Kept your current messaging key (use Settings → Restore messaging key to change it)." : "")); render(); });
         } catch (Exception e) { runOnUiThread(() -> toast("Restore failed: " + e.getMessage())); }
     }
 
@@ -872,7 +891,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         JSONArray nfts = p.optJSONArray("nfts");
-        if (nfts != null && nfts.length() > 0) renderNftShowcase(nfts, p.optString("tokenid"));
+        // Bind proofs to the ON-CHAIN discovered tokenid when viewing others, not the
+        // profile's self-declared one — else a profile could paste someone else's valid proofs.
+        String bindTid = (!mine && viewEntry != null) ? viewEntry.tokenid : p.optString("tokenid");
+        if (nfts != null && nfts.length() > 0) renderNftShowcase(nfts, bindTid);
 
         if (mine) {
             LinearLayout meta = card(); meta.addView(Design.lot(this, "Your page"));
@@ -1617,6 +1639,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void mintIdentity(String handle, String name, String bio, String profileUrl, TextView status) {
+        // Defense-in-depth: keep command/JSON-structure breakers out of the free-text metadata
+        // that gets interpolated into the tokencreate command (quotes are JSON-escaped upstream).
+        if (!Args.isSafeMeta(name) || !Args.isSafeMeta(bio)) { status.setText("Please remove { } or line breaks from your name/bio."); claimFailed(); return; }
         JSONObject meta = new JSONObject();
         putJson(meta, "salon", "1"); putJson(meta, "handle", handle); putJson(meta, "name", name); putJson(meta, "url", profileUrl); putJson(meta, "bio", bio);
         node.cmd("tokencreate name:" + meta + " amount:1 decimals:0 signtoken:" + pubkey, new NodeApi.Cb() {
@@ -1914,7 +1939,9 @@ public class MainActivity extends AppCompatActivity {
         HttpURLConnection c = null;
         try {
             if (url == null || !url.startsWith("http")) return null;
-            c = (HttpURLConnection) new URL(url).openConnection();
+            URL u = new URL(url);
+            if (ImageLoader.isBlockedHost(u.getHost())) return null;   // no SSRF to LAN/loopback/metadata via attacker-published profile URLs
+            c = (HttpURLConnection) u.openConnection();
             c.setConnectTimeout(8000); c.setReadTimeout(10000); c.setRequestProperty("User-Agent", "TheSalon");
             if (c.getResponseCode() != 200) return null;
             InputStream in = c.getInputStream(); ByteArrayOutputStream bos = new ByteArrayOutputStream();

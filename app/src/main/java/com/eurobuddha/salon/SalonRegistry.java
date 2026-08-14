@@ -58,10 +58,11 @@ final class SalonRegistry {
      *  send (funding coins only) — no token signature, so re-posting a stranger's
      *  public pointer is safe. */
     static void announce(NodeApi node, String tokenid, String url, String handle, Announced cb) {
+        if (!Args.isTokenId(tokenid)) { cb.done(false, "bad token id"); return; }
         String state = "{\"0\":\"" + tokenid + "\",\"1\":\"" + hex(url) + "\",\"2\":\"" + hex(handle) + "\"}";
         node.cmd("send address:" + SALON_ADDRESS + " amount:" + DUST + " state:" + state, new NodeApi.Cb() {
             @Override public void onResult(JSONObject json) {
-                if (json.optBoolean("status", false)) cb.done(true, "Published to the Salon.");
+                if (json.optBoolean("status", false) || json.optBoolean("pending", false)) cb.done(true, "Published to the Salon.");
                 else cb.done(false, json.optString("error", "publish failed"));
             }
             @Override public void onError(String m) { cb.done(false, m); }

@@ -20,6 +20,11 @@ final class TipTransport {
 
     static void tip(NodeApi node, String toAddress, String amount, String tokenid,
                     String fromHandle, String note, Cb cb) {
+        // Everything entering the command is validated first — toAddress comes from a
+        // stranger's hosted profile.json and could otherwise inject extra `send` parameters.
+        if (!Args.isAddr(toAddress)) { cb.onFailed("that profile's tip address is malformed — not sending"); return; }
+        if (!Args.isTokenId(tokenid)) { cb.onFailed("bad token id"); return; }
+        if (!Args.isDecimal(amount)) { cb.onFailed("bad amount"); return; }
         try {
             JSONObject state = new JSONObject();
             state.put("1", "0x" + Hex.to((fromHandle == null ? "" : fromHandle).getBytes(StandardCharsets.UTF_8)));

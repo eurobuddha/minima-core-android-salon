@@ -62,7 +62,7 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
         try {
             String hex = (s99.startsWith("0x") || s99.startsWith("0X")) ? s99.substring(2) : s99;
             Opened o = SalonComms.crypto(ctx).open(hex);
-            if (o == null) return;   // not a DM for us
+            if (o == null || !o.valid) return;   // not a DM for us, or sender signature doesn't verify (anti-impersonation)
             JSONObject m = new JSONObject(new String(o.plaintext, StandardCharsets.UTF_8));
             String from = m.optString("from", "someone"), body = m.optString("body", ""), media = m.optString("media", "");
             String preview = !body.isEmpty() ? body : (!media.isEmpty() ? "📎 media" : "");
