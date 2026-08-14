@@ -68,8 +68,9 @@ public class MainActivity extends AppCompatActivity {
     private SeekBar miniBar;
     private boolean miniSeeking = false;
 
-    private enum Screen { FEED, DISCOVER, HOME, VIEW, EDIT, ONBOARD, SETTINGS, HOSTING, HOSTING_EDIT }
+    private enum Screen { FEED, DISCOVER, HOME, VIEW, EDIT, ONBOARD, SETTINGS, HOSTING, HOSTING_EDIT, MESSAGES, THREAD }
     private Screen screen = Screen.HOME;
+    private String threadPeer = "";   // peer msgpk for the open THREAD screen
 
     private LinearLayout appbar, navRow, body;
     private ScrollView scroll;
@@ -174,24 +175,28 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /** Scan on-chain mail at our address; announce new DMs (v1 — Db + chat UI next). */
+    /** Scan on-chain mail at our address; store new DMs + refresh the badge/thread. */
     private void scanMail() {
         final String addr = SalonStore.get(this, "tipaddr");
         if (addr.isEmpty()) return;
         MinimaMail.scan(node, SalonComms.crypto(this), addr, msgs -> runOnUiThread(() -> {
-            JSONArray seen = SalonStore.arr(MainActivity.this, "mailseen");
-            java.util.HashSet<String> seenSet = new java.util.HashSet<>();
-            for (int i = 0; i < seen.length(); i++) seenSet.add(seen.optString(i));
+            MailDb db = MailDb.get(MainActivity.this);
             boolean baselined = "1".equals(SalonStore.get(MainActivity.this, "mailbaselined"));
-            java.util.List<String> fresh = new java.util.ArrayList<>();
+            int newCount = 0; String lastFrom = "", lastBody = "";
             for (MinimaMail.Msg m : msgs) {
-                if (m.coinid.isEmpty() || seenSet.contains(m.coinid)) continue;
-                seenSet.add(m.coinid); seen.put(m.coinid);
-                if (baselined) fresh.add("💬 @" + m.fromHandle.replaceFirst("^@", "") + ": " + (m.body.isEmpty() ? "[media]" : m.body));
+                if (m.coinid.isEmpty()) continue;
+                String preview = !m.body.isEmpty() ? m.body : (!m.mediaRef.isEmpty() ? "📎 media" : "");
+                boolean isNew = db.insert(m.coinid, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
+                if (isNew) {
+                    db.upsertContact(m.fromPublicId, m.fromHandle, "", m.fromAddr, preview, m.ts, baselined && !m.fromPublicId.equals(threadPeer));
+                    if (baselined) { newCount++; lastFrom = m.fromHandle; lastBody = preview; }
+                }
             }
-            SalonStore.setArr(MainActivity.this, "mailseen", seen);
             if (!baselined) SalonStore.put(MainActivity.this, "mailbaselined", "1");
-            for (String d : fresh) toast(d);
+            if (newCount > 0) {
+                if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
+                else { buildNav(); toast("💬 " + (newCount == 1 ? "@" + lastFrom.replaceFirst("^@", "") + ": " + lastBody : newCount + " new messages")); }
+            }
         }));
     }
 
@@ -305,6 +310,137 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    /* ================= Messages (DMs over Minima Mail) ================= */
+
+    private void openThread(String peerpk, String handle, String avatar, String addr) {
+        if (peerpk == null || peerpk.isEmpty()) { toast("This account can't receive messages yet."); return; }
+        MailDb db = MailDb.get(this);
+        MailDb.Contact ex = db.contact(peerpk);
+        db.upsertContact(peerpk, handle, avatar, addr, ex != null ? ex.lastbody : "", ex != null ? ex.lastts : 0, false);
+        threadPeer = peerpk;
+        db.clearUnread(peerpk);
+        go(Screen.THREAD);
+    }
+
+    private void renderMessages() {
+        masthead("Messages");
+        if (!SalonStore.hasIdentity(this)) { body.addView(Design.note(this, "Claim your Salon first to send messages."), lp(0, 0, 0, 12)); return; }
+        List<MailDb.Contact> cs = MailDb.get(this).contacts();
+        if (cs.isEmpty()) {
+            LinearLayout c = card();
+            c.addView(Design.note(this, "No messages yet. Open someone in Discover and tap Message to start a private, end-to-end-encrypted chat — sent over the chain, no server, no one can read it but you two."));
+            body.addView(c, lp(0, 0, 0, 12));
+            return;
+        }
+        for (MailDb.Contact ct : cs) {
+            LinearLayout c = card(); c.setClickable(true); Design.pressable(c);
+            final MailDb.Contact fct = ct;
+            c.setOnClickListener(v -> openThread(fct.peerpk, fct.handle, fct.avatar, fct.addr));
+            LinearLayout r = row();
+            r.addView(avatarView(ct.avatar, ct.handle == null ? "?" : ct.handle, 44));
+            LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, dp(8), 0);
+            col.addView(Design.text(this, "@" + (ct.handle == null ? "someone" : ct.handle.replaceFirst("^@", "")), 15, Design.INK(), Design.sansBold()));
+            TextView prev = Design.text(this, ct.lastbody == null ? "" : ct.lastbody, 12.5f, Design.DIM(), Design.sans()); prev.setMaxLines(1); prev.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            col.addView(prev);
+            r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+            if (ct.unread > 0) r.addView(Design.pill(this, String.valueOf(ct.unread), Design.PILL_MINE));
+            c.addView(r);
+            body.addView(c, lp(0, 0, 0, 10));
+        }
+    }
+
+    private void renderThread() {
+        if (threadPeer.isEmpty()) { go(Screen.MESSAGES); return; }
+        MailDb db = MailDb.get(this);
+        MailDb.Contact ct = db.contact(threadPeer);
+        String handle = ct != null && ct.handle != null ? ct.handle.replaceFirst("^@", "") : "chat";
+        masthead("@" + handle);
+        db.clearUnread(threadPeer);
+        LinearLayout bar = row();
+        bar.addView(btn("← Messages", false, () -> go(Screen.MESSAGES)), weight(46, 0, 0));
+        body.addView(bar, lp(0, 0, 0, 8));
+        List<MailDb.Message> msgs = db.messages(threadPeer);
+        if (msgs.isEmpty()) body.addView(Design.note(this, "No messages yet — say hi. Everything here is end-to-end encrypted and sent over the chain."), lp(0, 0, 0, 10));
+        for (MailDb.Message m : msgs) body.addView(bubble(m));
+        LinearLayout comp = card();
+        final EditText input = fieldMulti(comp, "Message", "");
+        LinearLayout crow = row();
+        crow.addView(btn("📎", false, this::attachDmMedia), new LinearLayout.LayoutParams(dp(54), dp(46)));
+        crow.addView(btn("Send", true, () -> sendDm(text(input), "", "")), weight(46, 6, 0));
+        comp.addView(crow, lp(0, 6, 0, 0));
+        body.addView(comp, lp(0, 8, 0, 0));
+        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private View bubble(MailDb.Message m) {
+        LinearLayout b = new LinearLayout(this); b.setOrientation(LinearLayout.VERTICAL);
+        b.setBackground(Design.ruled(this, m.mine ? Design.ACCENT() : Design.CARD(), Design.INK(), 1));
+        b.setPadding(dp(12), dp(9), dp(12), dp(9));
+        if (m.body != null && !m.body.isEmpty())
+            b.addView(Design.text(this, m.body, 14.5f, m.mine ? Design.PAPER() : Design.INK(), Design.sans()));
+        if (m.media != null && !m.media.isEmpty()) {
+            JSONObject mm = new JSONObject();
+            try { mm.put("type", m.mime != null && m.mime.contains("video") ? "video" : m.mime != null && m.mime.contains("audio") ? "audio" : "image"); mm.put("url", m.media); mm.put("caption", ""); } catch (Exception ignored) {}
+            b.addView(mediaCard(mm), lp(0, m.body != null && !m.body.isEmpty() ? 6 : 0, 0, 0));
+        }
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
+        blp.setMargins(m.mine ? dp(52) : 0, 0, m.mine ? 0 : dp(52), dp(6));
+        b.setLayoutParams(blp);
+        return b;
+    }
+
+    private void sendDm(String text, String mediaRef, String mediaMime) {
+        if (threadPeer.isEmpty()) return;
+        final String body = text == null ? "" : text.trim();
+        if (body.isEmpty() && (mediaRef == null || mediaRef.isEmpty())) { toast("Type a message."); return; }
+        MailDb db = MailDb.get(this);
+        final MailDb.Contact ct = db.contact(threadPeer);
+        if (ct == null || ct.addr == null || ct.addr.isEmpty()) { toast("No delivery address for this contact yet."); return; }
+        long ts = System.currentTimeMillis() / 1000;
+        String myHandle = "@" + SalonStore.get(this, "handle");
+        String myAddr = SalonStore.get(this, "tipaddr");
+        JSONObject msg = MinimaMail.compose(myHandle, myAddr, body, mediaRef, mediaMime, ts);
+        db.insert("me-" + System.currentTimeMillis() + "-" + Math.abs(body.hashCode()), threadPeer, true, body, mediaRef, mediaMime, ts, true);
+        db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
+        render();
+        MinimaMail.send(node, SalonComms.crypto(this), ct.addr, threadPeer, msg, new MinimaMail.Cb() {
+            @Override public void onSent(String txpowid) { runOnUiThread(() -> toast("Sent ⛏ (mining)")); }
+            @Override public void onFailed(String m) { runOnUiThread(() -> toast("Send failed: " + m)); }
+        });
+    }
+
+    private void attachDmMedia() {
+        if (threadPeer.isEmpty()) return;
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType("image/*");
+        startActivityForResult(Intent.createChooser(i, "Choose photo"), PICK_DM_IMG);
+    }
+
+    /* ---------------- messaging key backup / restore ---------------- */
+
+    private void backupMsgKey() {
+        io.execute(() -> {
+            final String seed = SalonComms.exportSeed(this);
+            runOnUiThread(() -> {
+                if (seed.isEmpty()) { toast("No messaging key yet."); return; }
+                LinearLayout box = dialogBox();
+                box.addView(Design.note(this, "This is your MESSAGING KEY. Anyone with it can read your DMs and impersonate you — store it safely (a password manager). Paste it on a new device or after a reinstall to keep the same inbox."), lp(0, 2, 0, 8));
+                TextView t = Design.text(this, seed, 12, Design.INK(), Design.mono()); copyOnTap(t, seed); box.addView(t);
+                new android.app.AlertDialog.Builder(this).setTitle("Back up messaging key").setView(box)
+                        .setPositiveButton("Copy", (d, w) -> { ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("salon-msgkey", seed)); toast("Copied — store it safely."); })
+                        .setNegativeButton("Close", null).show();
+            });
+        });
+    }
+
+    private void restoreMsgKey() {
+        LinearLayout box = dialogBox();
+        final EditText f = field(box, "Paste messaging key (hex)", "", false, "");
+        showDialog("Restore messaging key", box, "Restore", () -> io.execute(() -> {
+            final boolean ok = SalonComms.importSeed(this, text(f));
+            runOnUiThread(() -> { if (ok) { SalonStore.put(this, "msgpk", SalonComms.publicId(this)); toast("Restored. Re-publish your profile so others use the new key."); render(); } else toast("Invalid key."); });
+        }));
+    }
+
     /** GET-touch the owner's own relay blobs so their 7-day TTL resets each session. */
     private void touchOwnRelay() {
         final String pu = SalonStore.get(this, "profileUrl");
@@ -331,17 +467,31 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout tabs = new LinearLayout(this); tabs.setOrientation(LinearLayout.HORIZONTAL);
         tabs.addView(navTab("Feed", screen == Screen.FEED, () -> go(Screen.FEED)), weight1());
         tabs.addView(navTab("Discover", screen == Screen.DISCOVER || screen == Screen.VIEW, () -> go(Screen.DISCOVER)), weight1());
-        tabs.addView(navTab("My Salon", screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.EDIT, () -> go(Screen.HOME)), weight1());
+        tabs.addView(navTab("Salon", screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.EDIT, () -> go(Screen.HOME)), weight1());
+        int unread = 0; try { unread = MailDb.get(this).totalUnread(); } catch (Exception ignored) {}
+        tabs.addView(navTabBadge("Messages", screen == Screen.MESSAGES || screen == Screen.THREAD, unread, () -> go(Screen.MESSAGES)), weight1());
         tabs.addView(navTab("Settings", screen == Screen.SETTINGS || screen == Screen.HOSTING || screen == Screen.HOSTING_EDIT, () -> go(Screen.SETTINGS)), weight1());
         navRow.addView(tabs, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private View navTab(String label, boolean active, Runnable click) {
-        TextView t = Design.text(this, label.toUpperCase(), 10.5f, active ? Design.INK() : Design.DIM(), Design.sansBold());
-        t.setLetterSpacing(0.06f); t.setGravity(Gravity.CENTER); t.setPadding(0, dp(12), 0, dp(12));
+        TextView t = Design.text(this, label.toUpperCase(), 10f, active ? Design.INK() : Design.DIM(), Design.sansBold());
+        t.setLetterSpacing(0.04f); t.setGravity(Gravity.CENTER); t.setPadding(0, dp(12), 0, dp(12));
         if (active) t.setBackgroundColor(0x14000000);
         t.setOnClickListener(v -> click.run());
         return t;
+    }
+
+    private View navTabBadge(String label, boolean active, int unread, Runnable click) {
+        View base = navTab(label, active, click);
+        if (unread <= 0) return base;
+        FrameLayout f = new FrameLayout(this);
+        f.addView(base, new FrameLayout.LayoutParams(-1, -2));
+        TextView badge = Design.pill(this, unread > 9 ? "9+" : String.valueOf(unread), Design.PILL_MINE);
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        blp.topMargin = dp(5); blp.leftMargin = dp(34);
+        f.addView(badge, blp);
+        return f;
     }
 
     private void masthead(String title) {
@@ -370,6 +520,8 @@ public class MainActivity extends AppCompatActivity {
             case SETTINGS:     renderSettings(); break;
             case HOSTING:      renderHosting(); break;
             case HOSTING_EDIT: renderHostingEdit(); break;
+            case MESSAGES:     renderMessages(); break;
+            case THREAD:       renderThread(); break;
         }
     }
 
@@ -540,10 +692,13 @@ public class MainActivity extends AppCompatActivity {
         body.addView(bar, lp(0, 0, 0, 8));
         if (viewProfile == null) { body.addView(Design.note(this, "Loading @" + viewEntry.handle + "'s page…"), lp(0, 0, 0, 12)); return; }
         String tipAddr = viewProfile.optString("tipaddr", "");
+        String peerMsgpk = viewProfile.optString("msgpk", "");
+        boolean canMsg = !tipAddr.isEmpty() && !peerMsgpk.isEmpty();
         if (!tipAddr.isEmpty()) {
-            LinearLayout tipRow = row();
-            tipRow.addView(btn("💰 Tip @" + viewEntry.handle, true, () -> tipDialog(viewEntry.handle, tipAddr)), weight(46, 0, 0));
-            body.addView(tipRow, lp(0, 0, 0, 10));
+            LinearLayout arow = row();
+            if (canMsg) arow.addView(btn("💬 Message", true, () -> openThread(peerMsgpk, viewEntry.handle, viewProfile.optString("avatar", ""), tipAddr)), weight(46, 0, 4));
+            arow.addView(btn("💰 Tip", false, () -> tipDialog(viewEntry.handle, tipAddr)), weight(46, canMsg ? 4 : 0, 0));
+            body.addView(arow, lp(0, 0, 0, 10));
         }
         renderProfilePage(viewProfile, false);
     }
@@ -741,7 +896,7 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================= media: pick / upload / play ================= */
 
-    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45;
+    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45, PICK_DM_IMG = 46;
 
     private void pickMedia(int code, String mime) {
         if (HostingStore.getDefault(this) == null) { toast("Set hosting first."); return; }
@@ -754,6 +909,17 @@ public class MainActivity extends AppCompatActivity {
         if (res != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
         final int r = req;
+        if (r == PICK_DM_IMG) {   // DM photo: encrypt to the relay blob store, send the ref
+            toast("Sending photo…");
+            io.execute(() -> {
+                try {
+                    byte[] jpeg = readScaledJpeg(uri, 1400);
+                    String ref = new RelayUploader(Hosting.Profile.fresh(Hosting.TYPE_RELAY)).putFile(jpeg, "dm.jpg", "image/jpeg");
+                    runOnUiThread(() -> sendDm("", ref, "image/jpeg"));
+                } catch (Exception e) { runOnUiThread(() -> toast("Photo failed: " + e.getMessage())); }
+            });
+            return;
+        }
         if (profStatus != null) profStatus.setText("Uploading…");
         io.execute(() -> {
             try {
@@ -1278,6 +1444,8 @@ public class MainActivity extends AppCompatActivity {
             String tipaddr = SalonStore.get(this, "tipaddr");
             if (!tipaddr.isEmpty()) copyRow(idc, "Tip address", tipaddr);
             idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
+            idc.addView(btn("Back up messaging key", false, this::backupMsgKey), lph(44, 0, 8, 0, 0));
+            idc.addView(btn("Restore messaging key", false, this::restoreMsgKey), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Burn spare identity token", false, this::burnSpares), lph(44, 0, 8, 0, 0));
             body.addView(idc, lp(0, 0, 0, 12));
         }

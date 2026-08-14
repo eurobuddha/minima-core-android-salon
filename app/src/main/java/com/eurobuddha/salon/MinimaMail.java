@@ -27,10 +27,10 @@ final class MinimaMail {
     /** A decrypted inbound DM. {@code fromPublicId} is cryptographically verified; {@code fromHandle}
      *  is the display name inside the (signed) payload. */
     static final class Msg {
-        final String coinid, fromPublicId, fromHandle, body, mediaRef, mediaMime;
+        final String coinid, fromPublicId, fromHandle, fromAddr, body, mediaRef, mediaMime;
         final long ts; final boolean valid;
-        Msg(String coinid, String fromPublicId, String fromHandle, String body, String mediaRef, String mediaMime, long ts, boolean valid) {
-            this.coinid = coinid; this.fromPublicId = fromPublicId; this.fromHandle = fromHandle;
+        Msg(String coinid, String fromPublicId, String fromHandle, String fromAddr, String body, String mediaRef, String mediaMime, long ts, boolean valid) {
+            this.coinid = coinid; this.fromPublicId = fromPublicId; this.fromHandle = fromHandle; this.fromAddr = fromAddr;
             this.body = body; this.mediaRef = mediaRef; this.mediaMime = mediaMime; this.ts = ts; this.valid = valid;
         }
     }
@@ -70,8 +70,8 @@ final class MinimaMail {
                     if (o == null) continue;   // not for me / not a DM
                     try {
                         JSONObject m = new JSONObject(new String(o.plaintext, StandardCharsets.UTF_8));
-                        out.add(new Msg(cid, o.fromPublicId, m.optString("from", "someone"), m.optString("body", ""),
-                                m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid));
+                        out.add(new Msg(cid, o.fromPublicId, m.optString("from", "someone"), m.optString("addr", ""),
+                                m.optString("body", ""), m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid));
                     } catch (Exception ignored) {}
                 }
                 cb.onMessages(out);
@@ -80,10 +80,12 @@ final class MinimaMail {
         });
     }
 
-    static JSONObject compose(String fromHandle, String body, String mediaRef, String mediaMime, long ts) {
+    /** Build the message JSON to seal. {@code fromAddr} is my own tip address so the peer can reply. */
+    static JSONObject compose(String fromHandle, String fromAddr, String body, String mediaRef, String mediaMime, long ts) {
         JSONObject m = new JSONObject();
         try {
-            m.put("v", 1); m.put("from", fromHandle); m.put("body", body == null ? "" : body); m.put("ts", ts);
+            m.put("v", 1); m.put("from", fromHandle); m.put("addr", fromAddr == null ? "" : fromAddr);
+            m.put("body", body == null ? "" : body); m.put("ts", ts);
             if (mediaRef != null && !mediaRef.isEmpty()) { m.put("media", mediaRef); m.put("mime", mediaMime == null ? "" : mediaMime); }
         } catch (Exception ignored) {}
         return m;
