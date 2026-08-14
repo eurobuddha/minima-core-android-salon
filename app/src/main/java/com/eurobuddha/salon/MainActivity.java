@@ -74,6 +74,7 @@ public class MainActivity extends AppCompatActivity {
 
     private LinearLayout appbar, navRow, body;
     private ScrollView scroll;
+    private androidx.swiperefreshlayout.widget.SwipeRefreshLayout swipe;
     private FrameLayout rootFrame;
     private TextView nodeChip;
     private boolean nodeUp = false;
@@ -111,7 +112,11 @@ public class MainActivity extends AppCompatActivity {
         body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(16), dp(10), dp(16), dp(28));
         scroll.addView(body, new FrameLayout.LayoutParams(-1, -2));
-        chrome.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        swipe = new androidx.swiperefreshlayout.widget.SwipeRefreshLayout(this);
+        swipe.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        swipe.setColorSchemeColors(Design.ACCENT());
+        swipe.setOnRefreshListener(() -> { render(); swipe.setRefreshing(false); });
+        chrome.addView(swipe, new LinearLayout.LayoutParams(-1, 0, 1));
 
         buildMiniPlayer();
         chrome.addView(miniPlayer, new LinearLayout.LayoutParams(-1, -2));
@@ -678,6 +683,7 @@ public class MainActivity extends AppCompatActivity {
     private void render() {
         if (screen == Screen.EDIT) commitEditFields();   // an in-Edit action rebuilding the screen must not lose typed text
         renderEpoch++;
+        if (swipe != null) swipe.setEnabled(screen == Screen.FEED || screen == Screen.DISCOVER);   // pull-to-refresh where it makes sense
         buildNav(); body.removeAllViews();
         switch (screen) {
             case FEED:         renderFeed(); break;
@@ -939,7 +945,14 @@ public class MainActivity extends AppCompatActivity {
             LinearLayout actions = row();
             actions.addView(btn("Edit my page", true, () -> go(Screen.EDIT)), weight(46, 0, 4));
             actions.addView(btn("Publish", false, () -> publishSalon(null)), weight(46, 4, 0));
-            body.addView(actions, lp(0, 0, 0, 12));
+            body.addView(actions, lp(0, 0, 0, 8));
+            String myUrl = SalonStore.get(this, "profileUrl");
+            if (!myUrl.isEmpty()) {
+                LinearLayout share = row();
+                share.addView(btn("Share my page", false, () -> sharePage(myUrl)), weight(46, 0, 4));
+                if (myUrl.startsWith("http")) share.addView(btn("Open in browser", false, () -> openUrl(myUrl)), weight(46, 4, 0));
+                body.addView(share, lp(0, 0, 0, 12));
+            }
         }
 
         if (!p.optString("about").isEmpty()) {
@@ -1708,6 +1721,10 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout hostCard = card(); hostCard.addView(Design.lot(this, "Hosting"));
         addKvPlain(hostCard, "Destination", def == null ? "none set — required" : def.name() + " · " + def.type());
         hostCard.addView(btn(def == null ? "Set up hosting" : "Manage hosting", def == null, () -> go(Screen.HOSTING)), lph(46, 0, 8, 0, 0));
+        if (def == null) {
+            hostCard.addView(Design.note(this, "No server? Publish to the encrypted relay — zero setup, your page is stored end-to-end encrypted."), lp(0, 8, 0, 4));
+            hostCard.addView(btn("Publish with no server (relay)", false, this::quickStartRelay), lph(44, 0, 4, 0, 0));
+        }
         body.addView(hostCard, lp(0, 0, 0, 12));
 
         LinearLayout form = card(); form.addView(Design.lot(this, "Claim your handle"));
@@ -1910,7 +1927,8 @@ public class MainActivity extends AppCompatActivity {
             copyRow(idc, "Handle", "@" + SalonStore.get(this, "handle"));
             copyRow(idc, "Token", SalonStore.get(this, "tokenid"));
             String tipaddr = SalonStore.get(this, "tipaddr");
-            if (!tipaddr.isEmpty()) copyRow(idc, "Tip address", tipaddr);
+            if (!tipaddr.isEmpty()) { copyRow(idc, "Tip address", tipaddr);
+                idc.addView(btn("Show tip-address QR", false, () -> showQr("Tip @" + SalonStore.get(this, "handle"), tipaddr)), lph(44, 0, 4, 0, 0)); }
             idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Restore page from hosting", false, () -> hydrateFromHosted(SalonStore.get(this, "profileUrl"), true)), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Back up messaging key", false, this::backupMsgKey), lph(44, 0, 8, 0, 0));
@@ -2201,6 +2219,38 @@ public class MainActivity extends AppCompatActivity {
     private JSONArray removeAt(JSONArray a, int idx) { JSONArray out = new JSONArray(); for (int i = 0; i < a.length(); i++) if (i != idx) out.put(a.opt(i)); return out; }
 
     private void openUrl(String url) { try { String u = url.trim(); if (!u.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) u = "http://" + u; startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u))); } catch (Exception e) { toast("Couldn't open link"); } }
+
+    /** One-tap: create + default an encrypted-relay hosting profile (no server needed). */
+    private void quickStartRelay() {
+        Hosting.Profile p = Hosting.Profile.fresh(Hosting.TYPE_RELAY);
+        Hosting.put(p.j, "name", "Encrypted relay");
+        saveHost(p);
+        HostingStore.setDefault(this, p.id());
+        toast("Relay hosting ready — now claim your handle.");
+        render();
+    }
+
+    private void sharePage(String url) {
+        try {
+            Intent i = new Intent(Intent.ACTION_SEND).setType("text/plain");
+            i.putExtra(Intent.EXTRA_TEXT, "@" + SalonStore.get(this, "handle") + " on The Salon — " + url);
+            startActivity(Intent.createChooser(i, "Share your Salon"));
+        } catch (Exception e) { toast("Couldn't share"); }
+    }
+
+    private void showQr(String title, String data) {
+        Bitmap bmp = Qr.bitmap(data, 640);
+        if (bmp == null) { toast("Couldn't render QR"); return; }
+        Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+        LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setGravity(Gravity.CENTER);
+        col.setBackgroundColor(0xFFFFFFFF); col.setPadding(dp(24), dp(24), dp(24), dp(24));
+        ImageView iv = new ImageView(this); iv.setImageBitmap(bmp);
+        col.addView(iv, new LinearLayout.LayoutParams(dp(280), dp(280)));
+        TextView cap = Design.text(this, title, 13, 0xFF111111, Design.mono()); cap.setGravity(Gravity.CENTER); cap.setPadding(0, dp(16), 0, 0);
+        col.addView(cap);
+        col.setOnClickListener(v -> d.dismiss());
+        d.setContentView(col); d.show();
+    }
     private void toast(String m) { Toast.makeText(this, m, Toast.LENGTH_SHORT).show(); }
     private String text(EditText e) { return e.getText().toString(); }
     private static void putJson(JSONObject o, String k, String v) { try { o.put(k, v == null ? "" : v); } catch (Exception ignored) {} }

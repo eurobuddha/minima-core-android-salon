@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.salon"
         minSdk 28
         targetSdk 35
-        versionCode 907
-        versionName "0.9.7"
+        versionCode 1000
+        versionName "0.10.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,11 +33,12 @@ android {
 
     buildTypes {
         release {
-            // HELD at debug signing for now (new app, no existing users) — flip to
-            // signingConfigs.release when the fleet key is set on the build machine.
-            minifyEnabled false
+            // R8 shrink only (no obfuscation) — safe for JNA/lazysodium/jsch which resolve
+            // classes by name via reflection/native; keep rules in proguard-rules.pro.
+            minifyEnabled true
+            shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.release
+            signingConfig signingConfigs.release   // Minima family release key
         }
     }
 
@@ -74,6 +75,12 @@ dependencies {
     // same versions the comms code (support/freezepeach) uses.
     implementation 'com.goterl:lazysodium-android:5.1.0@aar'
     implementation 'net.java.dev.jna:jna:5.13.0@aar'
+
+    // QR codes (tip address / profile URL for in-person scanning) — pure-Java, no Android deps.
+    implementation 'com.google.zxing:core:3.5.3'
+
+    // pull-to-refresh on Feed / Discover
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
 }

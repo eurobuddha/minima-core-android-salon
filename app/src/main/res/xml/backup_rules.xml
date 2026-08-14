@@ -4,4 +4,6 @@
          device, so restoring the ciphertext onto a new device would be
          useless anyway. Exclude it so nothing sensitive travels in a backup. -->
     <exclude domain="sharedpref" path="statenft_hosting.xml"/>
+    <!-- salon_identity holds the Keystore-wrapped messaging seed — device-bound, exclude it. -->
+    <exclude domain="sharedpref" path="salon_identity.xml"/>
 </full-backup-content>

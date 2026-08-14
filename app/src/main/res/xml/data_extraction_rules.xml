@@ -2,8 +2,10 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="statenft_hosting.xml"/>
+        <exclude domain="sharedpref" path="salon_identity.xml"/>
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="statenft_hosting.xml"/>
+        <exclude domain="sharedpref" path="salon_identity.xml"/>
     </device-transfer>
 </data-extraction-rules>
