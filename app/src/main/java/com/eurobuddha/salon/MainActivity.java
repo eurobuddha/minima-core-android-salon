@@ -427,10 +427,20 @@ public class MainActivity extends AppCompatActivity {
                 box.addView(Design.note(this, "This is your MESSAGING KEY. Anyone with it can read your DMs and impersonate you — store it safely (a password manager). Paste it on a new device or after a reinstall to keep the same inbox."), lp(0, 2, 0, 8));
                 TextView t = Design.text(this, seed, 12, Design.INK(), Design.mono()); copyOnTap(t, seed); box.addView(t);
                 new android.app.AlertDialog.Builder(this).setTitle("Back up messaging key").setView(box)
-                        .setPositiveButton("Copy", (d, w) -> { ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("salon-msgkey", seed)); toast("Copied — store it safely."); })
+                        .setPositiveButton("Save file", (d, w) -> saveTextFile("salon-messaging-key.txt", seed))
+                        .setNeutralButton("Copy", (d, w) -> { ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("salon-msgkey", seed)); toast("Copied — store it safely."); })
                         .setNegativeButton("Close", null).show();
             });
         });
+    }
+
+    /** Save text to a file the user picks (system Save-As, no storage permission). */
+    private void saveTextFile(String suggestedName, String content) {
+        pendingSaveText = content;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("text/plain").putExtra(Intent.EXTRA_TITLE, suggestedName);
+        try { startActivityForResult(i, SAVE_MSGKEY); }
+        catch (Exception e) { pendingSaveText = null; toast("No file app to save with."); }
     }
 
     private void restoreMsgKey() {
@@ -989,7 +999,8 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================= media: pick / upload / play ================= */
 
-    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45, PICK_DM_IMG = 46;
+    private static final int PICK_AVATAR = 41, PICK_BANNER = 42, PICK_GALLERY_IMG = 43, PICK_GALLERY_VID = 44, PICK_GALLERY_AUD = 45, PICK_DM_IMG = 46, SAVE_MSGKEY = 51;
+    private String pendingSaveText;   // content queued for a SAF "Save file" (ACTION_CREATE_DOCUMENT)
 
     private void pickMedia(int code, String mime) {
         if (HostingStore.getDefault(this) == null) { toast("Set hosting first."); return; }
@@ -1002,6 +1013,17 @@ public class MainActivity extends AppCompatActivity {
         if (res != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
         final int r = req;
+        if (r == SAVE_MSGKEY) {   // write the queued text to the user-chosen file
+            final String content = pendingSaveText; pendingSaveText = null;
+            if (content == null) return;
+            io.execute(() -> {
+                try (java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
+                    os.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8)); os.flush();
+                    runOnUiThread(() -> toast("Saved. Keep this file safe — it unlocks your DMs."));
+                } catch (Exception e) { runOnUiThread(() -> toast("Save failed: " + e.getMessage())); }
+            });
+            return;
+        }
         if (r == PICK_DM_IMG) {   // DM photo: encrypt to the relay blob store, send the ref
             toast("Sending photo…");
             io.execute(() -> {
@@ -1470,8 +1492,40 @@ public class MainActivity extends AppCompatActivity {
             if (SalonStore.get(this, "name").isEmpty()) SalonStore.put(this, "name", meta.optString("name"));
             if (SalonStore.get(this, "bio").isEmpty()) SalonStore.put(this, "bio", meta.optString("bio"));
             SalonStore.put(this, "profileUrl", meta.optString("url")); claiming = false;
+            hydrateFromHosted(meta.optString("url"), false);   // reinstall: pull content back from the hosted page
             if (screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.FEED) go(Screen.HOME);
         } catch (Exception ignored) {}
+    }
+
+    /** A reinstall wipes the local draft, but the hosted profile.json still holds
+     *  everything — pull the CONTENT back so the page isn't blank. Never overwrites
+     *  tokenid/handle (on-chain authoritative) or the local messaging key (msgpk). */
+    private void hydrateFromHosted(final String url, final boolean loud) {
+        if (url == null || url.trim().isEmpty()) { if (loud) toast("No hosted page URL known yet."); return; }
+        if (loud) toast("Restoring your page…");
+        io.execute(() -> {
+            final JSONObject p = httpGetJson(url);
+            if (p == null) { if (loud) runOnUiThread(() -> toast("Couldn't reach your hosted page.")); return; }
+            JSONObject me = SalonStore.me(this);
+            boolean got = false;
+            try {
+                for (String k : new String[]{"name","bio","about","avatar","banner","webvalidate","tipaddr"}) {
+                    String v = p.optString(k, "");
+                    if (!v.isEmpty()) { me.put(k, v); got = true; }
+                }
+                for (String k : new String[]{"links","gallery","posts","nfts"}) {
+                    JSONArray a = p.optJSONArray(k);
+                    if (a != null && a.length() > 0) { me.put(k, a); got = true; }
+                }
+            } catch (Exception ignored) {}
+            SalonStore.save(this, me);
+            final boolean restored = got;
+            runOnUiThread(() -> {
+                if (restored) toast("Page restored from your hosting.");
+                else if (loud) toast("Nothing to restore — your hosted page is empty.");
+                render();
+            });
+        });
     }
 
     private void publishSalon(TextView status) {
@@ -1537,6 +1591,7 @@ public class MainActivity extends AppCompatActivity {
             String tipaddr = SalonStore.get(this, "tipaddr");
             if (!tipaddr.isEmpty()) copyRow(idc, "Tip address", tipaddr);
             idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
+            idc.addView(btn("Restore page from hosting", false, () -> hydrateFromHosted(SalonStore.get(this, "profileUrl"), true)), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Back up messaging key", false, this::backupMsgKey), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Restore messaging key", false, this::restoreMsgKey), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Burn spare identity token", false, this::burnSpares), lph(44, 0, 8, 0, 0));
