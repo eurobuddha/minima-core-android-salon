@@ -77,6 +77,8 @@ public class MainActivity extends AppCompatActivity {
     private FrameLayout rootFrame;
     private TextView nodeChip;
     private boolean nodeUp = false;
+    private boolean wasNodeUp = false;      // to re-render node-gated screens on connect
+    private String expandedNft = null;      // tokenid of the showcase holding currently expanded
     private String pubkey = "";
     private boolean adoptChecked = false;
     private boolean reannouncedThisSession = false;
@@ -164,6 +166,11 @@ public class MainActivity extends AppCompatActivity {
             ensureMailKey();
             ensureInboxAndScan();
         }
+        // The first render() runs at onCreate before the node connects; node-gated
+        // content (the holdings showcase, the tip/message bar) was drawn in its
+        // "no node" state. Re-render once, on the false->true transition, so it refreshes.
+        if (nodeUp && !wasNodeUp && (screen == Screen.HOME || screen == Screen.VIEW)) render();
+        wasNodeUp = nodeUp;
     }
 
     /** Scan the inbox (tips + DMs) — but only once the tip address is captured. On a fresh
@@ -875,29 +882,58 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Render showcased holdings; the VIEWER's node verifies each live before the badge. */
+    /** Render showcased holdings; the VIEWER's node verifies each live. Tap a row to
+     *  expand its details + a manual re-verify. */
     private void renderNftShowcase(JSONArray nfts, String profileTokenid) {
         LinearLayout c = card(); c.addView(Design.lot(this, "Holdings"));
-        String bindHex = NftProof.hexOf(profileTokenid);
+        final String bindHex = NftProof.hexOf(profileTokenid);
         for (int i = 0; i < nfts.length(); i++) {
-            JSONObject n = nfts.optJSONObject(i); if (n == null) continue;
-            LinearLayout r = row(); r.setPadding(0, dp(8), 0, dp(8));
+            final JSONObject n = nfts.optJSONObject(i); if (n == null) continue;
+            final String tid = n.optString("tokenid");
+            final boolean open = tid != null && tid.equals(expandedNft);
+            LinearLayout r = row(); r.setPadding(0, dp(8), 0, dp(8)); r.setClickable(true);
             ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP); iv.setBackgroundColor(0xFF141310);
             if (!n.optString("image").isEmpty()) ImageLoader.loadFull(this, n.optString("image"), iv);
             r.addView(iv, new LinearLayout.LayoutParams(dp(46), dp(46)));
             LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, dp(8), 0);
-            col.addView(Design.text(this, n.optString("name", Util.shorten(n.optString("tokenid"))), 15, Design.INK(), Design.sansBold()));
+            col.addView(Design.text(this, n.optString("name", Util.shorten(tid)), 15, Design.INK(), Design.sansBold()));
             final TextView badge = Design.text(this, "verifying on your node…", 11f, Design.DIM(), Design.mono());
             col.addView(badge);
             r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+            r.addView(Design.text(this, open ? "▾" : "▸", 15, Design.DIM(), Design.mono()));
+            r.setOnClickListener(v -> { expandedNft = open ? null : tid; render(); });
             c.addView(r);
-            if (nodeUp) NftProof.verify(node, n, bindHex, ok -> runOnUiThread(() -> {
-                badge.setText(ok ? "✓ VERIFIED HOLDING" : "✕ could not verify");
-                badge.setTextColor(ok ? 0xFF1F7A3F : Design.DIM());
-            }));
-            else badge.setText("connect a node to verify");
+            verifyInto(n, bindHex, badge);
+
+            if (open) {   // expanded: big image, copyable ids, verify line + re-verify
+                LinearLayout d = new LinearLayout(this); d.setOrientation(LinearLayout.VERTICAL);
+                d.setPadding(dp(4), dp(2), dp(4), dp(10));
+                if (!n.optString("image").isEmpty()) {
+                    ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF141310);
+                    ImageLoader.loadFull(this, n.optString("image"), big);
+                    d.addView(big, new LinearLayout.LayoutParams(-1, dp(180)));
+                }
+                copyRow(d, "Token id", tid);
+                if (!n.optString("coinid").isEmpty()) copyRow(d, "Coin id", n.optString("coinid"));
+                final TextView vline = Design.text(this, "verifying on your node…", 12f, Design.DIM(), Design.mono());
+                d.addView(vline, lp(0, 8, 0, 6));
+                d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline)), lph(44, 0, 4, 0, 0));
+                c.addView(d);
+                verifyInto(n, bindHex, vline);
+            }
         }
         body.addView(c, lp(0, 0, 0, 12));
+    }
+
+    /** Verify a showcase holding on THIS device's node and write the outcome (with the
+     *  failing-stage reason) into {@code tv}. Green on success, vermilion on failure. */
+    private void verifyInto(final JSONObject n, final String bindHex, final TextView tv) {
+        if (!nodeUp) { tv.setText("connect a node to verify"); tv.setTextColor(Design.DIM()); return; }
+        tv.setText("verifying on your node…"); tv.setTextColor(Design.DIM());
+        NftProof.verify(node, n, bindHex, (ok, reason) -> runOnUiThread(() -> {
+            tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
+            tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
+        }));
     }
 
     /* ---------------- prove & showcase a holding ---------------- */

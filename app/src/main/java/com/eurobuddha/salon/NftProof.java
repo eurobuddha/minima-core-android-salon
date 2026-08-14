@@ -27,7 +27,7 @@ import java.nio.charset.StandardCharsets;
 final class NftProof {
 
     interface Gen { void ok(JSONObject item); void fail(String message); }
-    interface Verify { void result(boolean verified); }
+    interface Verify { void result(boolean verified, String reason); }
 
     /** bindHex = hex of the owner's Salon tokenid (identity to bind the holding to). */
     static void generate(final NodeApi node, final String tokenid, final String bindHex, final Gen cb) {
@@ -79,30 +79,30 @@ final class NftProof {
     static void verify(final NodeApi node, final JSONObject item, final String bindHex, final Verify cb) {
         final String tokenid = item.optString("tokenid"), proof = item.optString("coinproof"),
                 script = item.optString("script"), pk = item.optString("publickey"), sig = item.optString("sig");
-        if (proof.isEmpty() || script.isEmpty() || pk.isEmpty() || sig.isEmpty()) { cb.result(false); return; }
+        if (proof.isEmpty() || script.isEmpty() || pk.isEmpty() || sig.isEmpty()) { cb.result(false, "incomplete proof"); return; }
         node.cmd("coincheck data:" + proof, new NodeApi.Cb() {
             @Override public void onResult(JSONObject c) {
                 JSONObject cr = c.optJSONObject("response");
                 JSONObject coin = cr == null ? null : cr.optJSONObject("coin");
-                if (cr == null || !cr.optBoolean("valid", false) || coin == null || !tokenid.equalsIgnoreCase(coin.optString("tokenid"))) { cb.result(false); return; }
+                if (cr == null || !cr.optBoolean("valid", false) || coin == null || !tokenid.equalsIgnoreCase(coin.optString("tokenid"))) { cb.result(false, "coin spent, not found, or wrong token"); return; }
                 final String coinAddr = coin.optString("address", "");
                 // the named pubkey must appear in the script that controls the coin
-                if (!script.toLowerCase().contains(pk.toLowerCase().replaceFirst("^0x", ""))) { cb.result(false); return; }
+                if (!script.toLowerCase().contains(pk.toLowerCase().replaceFirst("^0x", ""))) { cb.result(false, "key doesn't control the coin"); return; }
                 node.cmd("runscript script:\"" + script + "\"", new NodeApi.Cb() {
                     @Override public void onResult(JSONObject rs) {
                         JSONObject rr = rs.optJSONObject("response");
                         JSONObject clean = rr == null ? null : rr.optJSONObject("clean");
                         String computed = clean == null ? "" : clean.optString("address", "");
-                        if (computed.isEmpty() || !computed.equalsIgnoreCase(coinAddr)) { cb.result(false); return; }
+                        if (computed.isEmpty() || !computed.equalsIgnoreCase(coinAddr)) { cb.result(false, "script/address mismatch"); return; }
                         node.cmd("verify data:" + bindHex + " publickey:" + pk + " signature:" + sig, new NodeApi.Cb() {
-                            @Override public void onResult(JSONObject v) { cb.result(v.optBoolean("status", false)); }
-                            @Override public void onError(String m) { cb.result(false); }
+                            @Override public void onResult(JSONObject v) { boolean ok = v.optBoolean("status", false); cb.result(ok, ok ? "verified holding" : "signature not valid for this profile"); }
+                            @Override public void onError(String m) { cb.result(false, "verify call failed"); }
                         });
                     }
-                    @Override public void onError(String m) { cb.result(false); }
+                    @Override public void onError(String m) { cb.result(false, "script check failed"); }
                 });
             }
-            @Override public void onError(String m) { cb.result(false); }
+            @Override public void onError(String m) { cb.result(false, "coin check failed (node busy?)"); }
         });
     }
 
