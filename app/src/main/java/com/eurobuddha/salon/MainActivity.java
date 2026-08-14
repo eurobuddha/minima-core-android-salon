@@ -905,12 +905,16 @@ public class MainActivity extends AppCompatActivity {
             c.addView(r);
             verifyInto(n, bindHex, badge);
 
-            if (open) {   // expanded: big edition art, copyable ids, verify line + re-verify, held-editions gallery
+            if (open) {   // expanded: full main icon (tap→fullscreen), ids, verify, tappable editions gallery
                 LinearLayout d = new LinearLayout(this); d.setOrientation(LinearLayout.VERTICAL);
                 d.setPadding(dp(4), dp(2), dp(4), dp(10));
-                final ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF141310);
-                if (!n.optString("image").isEmpty()) ImageLoader.loadFull(this, n.optString("image"), big);
-                d.addView(big, new LinearLayout.LayoutParams(-1, dp(200)));
+                final String iconUrl = n.optString("image");
+                if (!iconUrl.isEmpty()) {
+                    ImageView hero = new ImageView(this); hero.setScaleType(ImageView.ScaleType.FIT_CENTER); hero.setBackgroundColor(0xFF141310);
+                    ImageLoader.loadFull(this, iconUrl, hero); hero.setClickable(true); hero.setOnClickListener(v -> openImage(iconUrl));
+                    d.addView(hero, new LinearLayout.LayoutParams(-1, dp(300)));
+                    d.addView(Design.text(this, "tap the artwork to view it full-screen", 10.5f, Design.DIM(), Design.mono()), lp(0, 4, 0, 2));
+                }
                 copyRow(d, "Token id", tid);
                 if (!n.optString("coinid").isEmpty()) copyRow(d, "Coin id", n.optString("coinid"));
                 final TextView vline = Design.text(this, "verifying on your node…", 12f, Design.DIM(), Design.mono());
@@ -918,7 +922,7 @@ public class MainActivity extends AppCompatActivity {
                 d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline)), lph(44, 0, 4, 0, 0));
                 c.addView(d);
                 verifyInto(n, bindHex, vline);
-                renderEditionArt(d, big, tid, n.optString("coinid"));   // real edition art (embed OR url) + your other editions
+                renderEditionArt(d, tid);   // the state-variable editions, as a tappable gallery
             }
         }
         body.addView(c, lp(0, 0, 0, 12));
@@ -935,12 +939,12 @@ public class MainActivity extends AppCompatActivity {
         }));
     }
 
-    /** Load a StateNFT holding's REAL edition art into {@code big}, and a gallery of every
-     *  OTHER edition THIS node holds. Handles BOTH modes: embedded state art, and url-mode
-     *  ({@code base + index + ext}) collections like "gallery bibeau" whose images are hosted
-     *  externally. base/ext come from the token metadata (balance); indices from each coin's
-     *  state. A stranger who owns no editions still sees the proven edition (from the proof). */
-    private void renderEditionArt(final LinearLayout parent, final ImageView big, final String tokenid, final String provenCoinid) {
+    /** The StateNFT's per-edition state-variable images THIS node holds, as a 2-up gallery —
+     *  each tile taps into a fullscreen, swipeable carousel over every edition. Handles BOTH
+     *  modes: embedded state art, and url-mode ({@code base + index + ext}) collections like
+     *  "gallery bibeau". base/ext from the token metadata (balance); index from each coin's
+     *  state port 0. Empty (silent) for a viewer who holds no editions. */
+    private void renderEditionArt(final LinearLayout parent, final String tokenid) {
         if (!nodeUp || tokenid == null || tokenid.isEmpty()) return;
         node.cmd("balance tokenid:" + tokenid, new NodeApi.Cb() {
             @Override public void onResult(JSONObject bal) {
@@ -957,30 +961,31 @@ public class MainActivity extends AppCompatActivity {
                 node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
                     @Override public void onResult(JSONObject r) {
                         JSONArray arr = r.optJSONArray("response"); if (arr == null) return;
-                        final java.util.ArrayList<String> others = new java.util.ArrayList<>();
-                        String proven = "";
+                        final java.util.List<JSONObject> editions = new java.util.ArrayList<>();
+                        final java.util.HashSet<String> seen = new java.util.HashSet<>();
                         for (int i = 0; i < arr.length(); i++) {
                             JSONObject coin = arr.optJSONObject(i); if (coin == null) continue;
                             String u = NftProof.editionImageUrl(coin, fbase, fext);
-                            if (u.isEmpty()) continue;
-                            if (provenCoinid != null && provenCoinid.equalsIgnoreCase(coin.optString("coinid"))) proven = u;
-                            else if (!others.contains(u)) others.add(u);
+                            if (u.isEmpty() || !seen.add(u)) continue;
+                            String idx = NftProof.state(coin, 0);
+                            try { JSONObject it = new JSONObject(); it.put("url", u);
+                                it.put("caption", idx != null && idx.matches("[0-9]+") ? "Edition #" + idx : "Edition"); editions.add(it); }
+                            catch (Exception ignored) {}
                         }
-                        final String provenUrl = proven;
+                        if (editions.isEmpty()) return;
                         runOnUiThread(() -> {
-                            if (!provenUrl.isEmpty()) ImageLoader.loadFull(MainActivity.this, provenUrl, big);
-                            else if (!others.isEmpty()) ImageLoader.loadFull(MainActivity.this, others.get(0), big);
-                            if (others.isEmpty()) return;
-                            parent.addView(Design.text(MainActivity.this, "+ " + others.size() + " more edition" + (others.size() == 1 ? "" : "s") + " you hold", 11f, Design.DIM(), Design.mono()), lp(0, 8, 0, 6));
+                            parent.addView(Design.text(MainActivity.this, editions.size() + " STATE IMAGE" + (editions.size() == 1 ? "" : "S") + " YOU HOLD · TAP TO ENLARGE", 9f, Design.DIM(), Design.sansBold()), lp(0, 12, 0, 6));
                             LinearLayout g = null;
-                            for (int i = 0; i < others.size() && i < 24; i++) {
-                                if (i % 3 == 0) { g = row(); parent.addView(g, lp(0, 0, 0, 6)); }
+                            for (int i = 0; i < editions.size(); i++) {
+                                final int idx = i;
+                                if (i % 2 == 0) { g = row(); parent.addView(g, lp(0, 0, 0, 6)); }
                                 ImageView t = new ImageView(MainActivity.this); t.setScaleType(ImageView.ScaleType.CENTER_CROP); t.setBackgroundColor(0xFF141310);
-                                ImageLoader.loadFull(MainActivity.this, others.get(i), t);
-                                LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(100), 1); tp.setMargins(0, 0, i % 3 == 2 ? 0 : dp(6), 0);
+                                t.setClickable(true); t.setOnClickListener(v -> openCarousel(editions, idx));
+                                ImageLoader.loadFull(MainActivity.this, editions.get(i).optString("url"), t);
+                                LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(168), 1); tp.setMargins(0, 0, i % 2 == 0 ? dp(6) : 0, 0);
                                 g.addView(t, tp);
                             }
-                            for (int pad = others.size() % 3; pad != 0 && pad < 3; pad++) g.addView(new View(MainActivity.this), new LinearLayout.LayoutParams(0, dp(100), 1));
+                            if (editions.size() % 2 == 1) g.addView(new View(MainActivity.this), new LinearLayout.LayoutParams(0, dp(168), 1));
                         });
                     }
                     @Override public void onError(String m) {}
