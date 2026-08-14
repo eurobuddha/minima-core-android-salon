@@ -145,6 +145,19 @@ public class MainActivity extends AppCompatActivity {
         if (SalonStore.hasIdentity(this)) screen = Screen.HOME;
         render();
         refreshUnread();   // seed the nav badge without a UI-thread DB query
+
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                switch (screen) {   // walk UP the logical stack instead of exiting the app
+                    case THREAD:       go(Screen.MESSAGES); break;
+                    case VIEW:         go(Screen.DISCOVER); break;
+                    case EDIT:         go(Screen.HOME); break;
+                    case HOSTING:      go(Screen.SETTINGS); break;
+                    case HOSTING_EDIT: go(Screen.HOSTING); break;
+                    default:           setEnabled(false); getOnBackPressedDispatcher().onBackPressed(); setEnabled(true);
+                }
+            }
+        });
     }
 
     private void onNode() {
@@ -172,7 +185,7 @@ public class MainActivity extends AppCompatActivity {
         // The first render() runs at onCreate before the node connects; node-gated
         // content (the holdings showcase, the tip/message bar) was drawn in its
         // "no node" state. Re-render once, on the false->true transition, so it refreshes.
-        if (nodeUp && !wasNodeUp && (screen == Screen.HOME || screen == Screen.VIEW)) render();
+        if (nodeUp && !wasNodeUp && (screen == Screen.HOME || screen == Screen.VIEW || screen == Screen.DISCOVER || screen == Screen.MESSAGES)) render();
         wasNodeUp = nodeUp;
     }
 
@@ -281,6 +294,12 @@ public class MainActivity extends AppCompatActivity {
                 + (note.isEmpty() ? "" : " — " + note);
     }
 
+    private static boolean arrEmpty(JSONArray a) { return a == null || a.length() == 0; }
+    private static boolean emptyProfile(JSONObject p) {
+        return p.optString("about", "").isEmpty() && arrEmpty(p.optJSONArray("links"))
+                && arrEmpty(p.optJSONArray("gallery")) && arrEmpty(p.optJSONArray("posts")) && arrEmpty(p.optJSONArray("nfts"));
+    }
+
     /** Keep only the most-recent {@code max} entries of a persisted seen-id list (unbounded growth guard). */
     private static JSONArray capArr(JSONArray a, int max) {
         if (a == null || a.length() <= max) return a;
@@ -306,11 +325,23 @@ public class MainActivity extends AppCompatActivity {
             presets.addView(pb, weight(40, 0, amt.equals("20") ? 0 : 6));
         }
         box.addView(presets, lp(0, 6, 0, 4));
+        final TextView bal = Design.note(this, "Checking your balance…");
+        box.addView(bal, lp(0, 0, 0, 4));
+        final Runnable refreshBal = () -> node.cmd("balance tokenid:" + tokenid[0], new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                String s = "0"; try { JSONArray a = j.optJSONArray("response"); if (a != null && a.length() > 0) s = a.optJSONObject(0).optString("sendable", "0"); } catch (Exception ignored) {}
+                final String have = s;
+                runOnUiThread(() -> bal.setText("Available: " + have + " " + TipTransport.label(tokenid[0])));
+            }
+            @Override public void onError(String m) {}
+        });
+        refreshBal.run();
         final EditText note = field(box, "Note (optional)", "", false, "nice work!");
         curBtn.setOnClickListener(v -> {
             tokenid[0] = tokenid[0].equals(TipTransport.MXUSD) ? TipTransport.MINIMA : TipTransport.MXUSD;
             curBtn.setText("Currency: " + TipTransport.label(tokenid[0]));
             presets.setVisibility(tokenid[0].equals(TipTransport.MXUSD) ? View.VISIBLE : View.GONE);
+            refreshBal.run();
         });
         new android.app.AlertDialog.Builder(this).setTitle("Send a tip to @" + handle).setView(box)
                 .setPositiveButton("Send", (d, w) -> sendTip(handle, toAddr, tokenid[0], text(amount).trim(), text(note).trim()))
@@ -416,6 +447,8 @@ public class MainActivity extends AppCompatActivity {
             try { mm.put("type", m.mime != null && m.mime.contains("video") ? "video" : m.mime != null && m.mime.contains("audio") ? "audio" : "image"); mm.put("url", m.media); mm.put("caption", ""); } catch (Exception ignored) {}
             b.addView(mediaCard(mm), lp(0, m.body != null && !m.body.isEmpty() ? 6 : 0, 0, 0));
         }
+        String when = Util.ago(m.ts);
+        if (!when.isEmpty()) b.addView(Design.text(this, when, 9.5f, m.mine ? Design.PAPER() : Design.DIM(), Design.mono()), lp(0, 3, 0, 0));
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
         blp.setMargins(m.mine ? dp(52) : 0, 0, m.mine ? 0 : dp(52), dp(6));
         b.setLayoutParams(blp);
@@ -636,10 +669,14 @@ public class MainActivity extends AppCompatActivity {
         appbar.addView(Design.rule(this, 2), new LinearLayout.LayoutParams(-1, dp(2)));
     }
 
-    private void go(Screen s) { screen = s; render(); }   // audio keeps playing across screens
+    private void go(Screen s) {
+        if (screen == Screen.EDIT && s != Screen.EDIT) commitEditFields();   // preserve the draft when leaving Edit
+        screen = s; render();
+    }
 
     private int renderEpoch = 0;   // bumped every render(); async painters bail if it moved (stale screen)
     private void render() {
+        if (screen == Screen.EDIT) commitEditFields();   // an in-Edit action rebuilding the screen must not lose typed text
         renderEpoch++;
         buildNav(); body.removeAllViews();
         switch (screen) {
@@ -757,6 +794,8 @@ public class MainActivity extends AppCompatActivity {
             who.setPadding(dp(9), 0, 0, 0);
             who.setOnClickListener(v -> openTokenProfile(post.optString("_tid")));
             head.addView(who, new LinearLayout.LayoutParams(0, -2, 1));
+            String when = Util.ago(post.optLong("ts", 0));
+            if (!when.isEmpty()) head.addView(Design.text(this, when, 10.5f, Design.DIM(), Design.mono()));
             c.addView(head, lp(0, 0, 0, 8));
             if (!post.optString("text").isEmpty()) c.addView(Design.body(this, post.optString("text")), lp(0, 0, 0, 6));
             addPostMedia(c, post);
@@ -806,10 +845,11 @@ public class MainActivity extends AppCompatActivity {
         }));
     }
 
+    private boolean viewFailed = false;
     private void openProfile(SalonRegistry.Entry e) {
-        viewEntry = e; viewProfile = null;
+        viewEntry = e; viewProfile = null; viewFailed = false;
         go(Screen.VIEW);
-        io.execute(() -> { JSONObject p = httpGetJson(e.url); runOnUiThread(() -> { viewProfile = p; if (screen == Screen.VIEW) render(); }); });
+        io.execute(() -> { JSONObject p = httpGetJson(e.url); runOnUiThread(() -> { viewProfile = p; viewFailed = (p == null); if (screen == Screen.VIEW) render(); }); });
     }
 
     private void openTokenProfile(String tokenid) {
@@ -833,7 +873,18 @@ public class MainActivity extends AppCompatActivity {
             render();
         }), weight(40, 4, 0));
         body.addView(bar, lp(0, 0, 0, 8));
-        if (viewProfile == null) { body.addView(Design.note(this, "Loading @" + viewEntry.handle + "'s page…"), lp(0, 0, 0, 12)); return; }
+        if (viewProfile == null) {
+            if (viewFailed) {
+                LinearLayout c = card();
+                c.addView(Design.note(this, "Couldn't reach @" + viewEntry.handle + "'s page — their host may be offline."));
+                LinearLayout er = row();
+                er.addView(btn("Try again", true, () -> openProfile(viewEntry)), weight(48, 0, 4));
+                er.addView(btn("Open in browser", false, () -> openUrl(viewEntry.url)), weight(48, 4, 0));
+                c.addView(er, lp(0, 10, 0, 0));
+                body.addView(c, lp(0, 0, 0, 12));
+            } else body.addView(Design.note(this, "Loading @" + viewEntry.handle + "'s page…"), lp(0, 0, 0, 12));
+            return;
+        }
         String tipAddr = viewProfile.optString("tipaddr", "");
         String peerMsgpk = viewProfile.optString("msgpk", "");
         boolean canMsg = !tipAddr.isEmpty() && !peerMsgpk.isEmpty();
@@ -922,7 +973,9 @@ public class MainActivity extends AppCompatActivity {
                 LinearLayout pc = new LinearLayout(this); pc.setOrientation(LinearLayout.VERTICAL);
                 pc.setPadding(0, dp(8), 0, dp(8));
                 if (i < posts.length() - 1) pc.addView(Design.rule(this, 1), new LinearLayout.LayoutParams(-1, dp(1)));
-                if (!post.optString("text").isEmpty()) pc.addView(Design.body(this, post.optString("text")), lp(0, 6, 0, 4));
+                String when = Util.ago(post.optLong("ts", 0));
+                if (!when.isEmpty()) pc.addView(Design.text(this, when, 10f, Design.DIM(), Design.mono()), lp(0, 6, 0, 0));
+                if (!post.optString("text").isEmpty()) pc.addView(Design.body(this, post.optString("text")), lp(0, when.isEmpty() ? 6 : 2, 0, 4));
                 addPostMedia(pc, post);
                 c.addView(pc);
             }
@@ -934,6 +987,13 @@ public class MainActivity extends AppCompatActivity {
         // profile's self-declared one — else a profile could paste someone else's valid proofs.
         String bindTid = (!mine && viewEntry != null) ? viewEntry.tokenid : p.optString("tokenid");
         if (nfts != null && nfts.length() > 0) renderNftShowcase(nfts, bindTid);
+
+        if (mine && emptyProfile(p)) {
+            LinearLayout nud = card(); nud.setBackground(Design.dashed(this, Design.CARD(), Design.DIM()));
+            nud.addView(Design.note(this, "Your page is empty. Add a bio, photos, video, music and posts — then publish to share it."));
+            nud.addView(btn("Edit your page", true, () -> go(Screen.EDIT)), lph(46, 0, 10, 0, 0));
+            body.addView(nud, lp(0, 0, 0, 12));
+        }
 
         if (mine) {
             LinearLayout meta = card(); meta.addView(Design.lot(this, "Your page"));
@@ -1107,15 +1167,29 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================= EDIT hub ================= */
 
-    private EditText edAvatar, edBanner, edWebvalidate; private TextView profStatus;
+    private EditText edName, edBio, edAbout, edAvatar, edBanner, edWebvalidate; private TextView profStatus;
+
+    /** Persist the Edit text fields to the local draft so an in-Edit render() (add link,
+     *  upload, delete a row) or navigating away never discards what the user typed. */
+    private void commitEditFields() {
+        if (edName == null) return;
+        SalonStore.put(this, "name", text(edName));
+        SalonStore.put(this, "bio", text(edBio));
+        SalonStore.put(this, "about", text(edAbout));
+        SalonStore.put(this, "avatar", text(edAvatar));
+        SalonStore.put(this, "banner", text(edBanner));
+        SalonStore.put(this, "webvalidate", text(edWebvalidate));
+    }
 
     private void renderEdit() {
         masthead("Edit page");
+        body.addView(btn("← My Salon", false, () -> go(Screen.HOME)), lph(44, 0, 0, 0, 10));
         JSONObject me = SalonStore.me(this);
         LinearLayout who = card(); who.addView(Design.lot(this, "You"));
-        EditText name = field(who, "Display name", me.optString("name"), false, "");
-        EditText bio = field(who, "Bio (one line)", me.optString("bio"), false, "");
-        EditText about = fieldMulti(who, "About (long-form)", me.optString("about"));
+        edName = field(who, "Display name", me.optString("name"), false, "");
+        edBio = field(who, "Bio (one line)", me.optString("bio"), false, "");
+        edAbout = fieldMulti(who, "About (long-form)", me.optString("about"));
+        EditText name = edName, bio = edBio, about = edAbout;   // aliases for the existing Save handler below
         edAvatar = field(who, "Avatar URL", me.optString("avatar"), false, "https://…");
         who.addView(btn("Upload avatar", false, () -> pickMedia(PICK_AVATAR, "image/*")), lph(42, 0, 4, 0, 6));
         edBanner = field(who, "Banner URL", me.optString("banner"), false, "https://…");
@@ -1268,6 +1342,7 @@ public class MainActivity extends AppCompatActivity {
             });
             return;
         }
+        toast("Uploading…");   // profStatus is at the bottom of a long scroll — give visible feedback here too
         if (profStatus != null) profStatus.setText("Uploading…");
         io.execute(() -> {
             try {
@@ -2026,11 +2101,18 @@ public class MainActivity extends AppCompatActivity {
 
     /** kv row: shortened value, TAP copies the FULL value. */
     private void copyRow(LinearLayout parent, String k, String full) {
-        LinearLayout r = row(); r.setPadding(0, dp(4), 0, dp(4));
+        LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout head = row();
         TextView key = Design.text(this, k.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()); key.setLetterSpacing(0.12f);
-        r.addView(key, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView val = Design.text(this, Util.shorten(full), 11.5f, Design.INK(), Design.mono()); val.setGravity(Gravity.END);
-        copyOnTap(val, full); r.addView(val, new LinearLayout.LayoutParams(0, -2, 1.6f)); parent.addView(r);
+        head.addView(key, new LinearLayout.LayoutParams(0, -2, 1));
+        head.addView(Design.text(this, "TAP TO COPY", 8.5f, Design.ACCENT(), Design.sansBold()));
+        col.addView(head);
+        // Show the FULL value (no truncation) in a tappable box — wraps rather than clipping.
+        TextView val = Design.text(this, full, 11f, Design.INK(), Design.mono());
+        val.setBackground(Design.dashed(this, Design.CARD(), Design.DIM())); val.setPadding(dp(8), dp(6), dp(8), dp(6));
+        copyOnTap(val, full);
+        col.addView(val, lp(0, 3, 0, 0));
+        parent.addView(col);
     }
 
     private void copyOnTap(TextView t, String full) {
