@@ -27,7 +27,7 @@ import java.nio.charset.StandardCharsets;
 final class NftProof {
 
     interface Gen { void ok(JSONObject item); void fail(String message); }
-    interface Verify { void result(boolean verified, String reason); }
+    interface Verify { void result(boolean verified, String reason, String stateImage); }
 
     /** bindHex = hex of the owner's Salon tokenid (identity to bind the holding to). */
     static void generate(final NodeApi node, final String tokenid, final String bindHex, final Gen cb) {
@@ -79,31 +79,63 @@ final class NftProof {
     static void verify(final NodeApi node, final JSONObject item, final String bindHex, final Verify cb) {
         final String tokenid = item.optString("tokenid"), proof = item.optString("coinproof"),
                 script = item.optString("script"), pk = item.optString("publickey"), sig = item.optString("sig");
-        if (proof.isEmpty() || script.isEmpty() || pk.isEmpty() || sig.isEmpty()) { cb.result(false, "incomplete proof"); return; }
+        if (proof.isEmpty() || script.isEmpty() || pk.isEmpty() || sig.isEmpty()) { cb.result(false, "incomplete proof", ""); return; }
         node.cmd("coincheck data:" + proof, new NodeApi.Cb() {
             @Override public void onResult(JSONObject c) {
                 JSONObject cr = c.optJSONObject("response");
                 JSONObject coin = cr == null ? null : cr.optJSONObject("coin");
-                if (cr == null || !cr.optBoolean("valid", false) || coin == null || !tokenid.equalsIgnoreCase(coin.optString("tokenid"))) { cb.result(false, "coin spent, not found, or wrong token"); return; }
+                if (cr == null || !cr.optBoolean("valid", false) || coin == null || !tokenid.equalsIgnoreCase(coin.optString("tokenid"))) { cb.result(false, "coin spent, not found, or wrong token", ""); return; }
                 final String coinAddr = coin.optString("address", "");
+                // the sealed StateNFT edition art rides in the proof's coin state (port 1)
+                final String stateImg = stateImageUri(coin);
                 // the named pubkey must appear in the script that controls the coin
-                if (!script.toLowerCase().contains(pk.toLowerCase().replaceFirst("^0x", ""))) { cb.result(false, "key doesn't control the coin"); return; }
+                if (!script.toLowerCase().contains(pk.toLowerCase().replaceFirst("^0x", ""))) { cb.result(false, "key doesn't control the coin", ""); return; }
                 node.cmd("runscript script:\"" + script + "\"", new NodeApi.Cb() {
                     @Override public void onResult(JSONObject rs) {
                         JSONObject rr = rs.optJSONObject("response");
                         JSONObject clean = rr == null ? null : rr.optJSONObject("clean");
                         String computed = clean == null ? "" : clean.optString("address", "");
-                        if (computed.isEmpty() || !computed.equalsIgnoreCase(coinAddr)) { cb.result(false, "script/address mismatch"); return; }
+                        if (computed.isEmpty() || !computed.equalsIgnoreCase(coinAddr)) { cb.result(false, "script/address mismatch", ""); return; }
                         node.cmd("verify data:" + bindHex + " publickey:" + pk + " signature:" + sig, new NodeApi.Cb() {
-                            @Override public void onResult(JSONObject v) { boolean ok = v.optBoolean("status", false); cb.result(ok, ok ? "verified holding" : "signature not valid for this profile"); }
-                            @Override public void onError(String m) { cb.result(false, "verify call failed"); }
+                            @Override public void onResult(JSONObject v) { boolean ok = v.optBoolean("status", false); cb.result(ok, ok ? "verified holding" : "signature not valid for this profile", ok ? stateImg : ""); }
+                            @Override public void onError(String m) { cb.result(false, "verify call failed", ""); }
                         });
                     }
-                    @Override public void onError(String m) { cb.result(false, "script check failed"); }
+                    @Override public void onError(String m) { cb.result(false, "script check failed", ""); }
                 });
             }
-            @Override public void onError(String m) { cb.result(false, "coin check failed (node busy?)"); }
+            @Override public void onError(String m) { cb.result(false, "coin check failed (node busy?)", ""); }
         });
+    }
+
+    /** The sealed StateNFT edition image (coin state port 1, an {@code [base64]} blob) as a
+     *  data: URI, or "" for a plain token/NFT with no embedded state art. Ported from Atelier
+     *  StateNft; renders via {@link ImageTools#dataUri} + ImageLoader's data: path. */
+    static String stateImageUri(JSONObject coin) {
+        String s = state(coin, 1);
+        if (s != null && s.length() > 2 && s.startsWith("[") && s.endsWith("]"))
+            return ImageTools.dataUri(s.substring(1, s.length() - 1));
+        return "";
+    }
+
+    /** Read a coin's state variable at {@code port} (array or object form). */
+    static String state(JSONObject coin, int port) {
+        Object raw = coin == null ? null : coin.opt("state");
+        if (raw instanceof JSONObject) { Object d = ((JSONObject) raw).opt(String.valueOf(port)); return d == null ? null : clean(d); }
+        if (!(raw instanceof JSONArray)) return null;
+        JSONArray st = (JSONArray) raw;
+        for (int i = 0; i < st.length(); i++) {
+            JSONObject s = st.optJSONObject(i);
+            if (s != null && String.valueOf(s.opt("port")).equals(String.valueOf(port))) return clean(s.opt("data"));
+        }
+        return null;
+    }
+
+    private static String clean(Object v) {
+        if (v == null) return null;
+        String s = String.valueOf(v).trim();
+        if (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\"")) s = s.substring(1, s.length() - 1);
+        return s;
     }
 
     static String hexOf(String s) {

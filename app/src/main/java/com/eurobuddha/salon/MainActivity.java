@@ -903,37 +903,71 @@ public class MainActivity extends AppCompatActivity {
             r.addView(Design.text(this, open ? "▾" : "▸", 15, Design.DIM(), Design.mono()));
             r.setOnClickListener(v -> { expandedNft = open ? null : tid; render(); });
             c.addView(r);
-            verifyInto(n, bindHex, badge);
+            verifyInto(n, bindHex, badge, iv);   // the thumbnail upgrades to the sealed art once verified
 
-            if (open) {   // expanded: big image, copyable ids, verify line + re-verify
+            if (open) {   // expanded: big sealed image, copyable ids, verify line + re-verify, held-editions gallery
                 LinearLayout d = new LinearLayout(this); d.setOrientation(LinearLayout.VERTICAL);
                 d.setPadding(dp(4), dp(2), dp(4), dp(10));
-                if (!n.optString("image").isEmpty()) {
-                    ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF141310);
-                    ImageLoader.loadFull(this, n.optString("image"), big);
-                    d.addView(big, new LinearLayout.LayoutParams(-1, dp(180)));
-                }
+                final ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF141310);
+                if (!n.optString("image").isEmpty()) ImageLoader.loadFull(this, n.optString("image"), big);
+                d.addView(big, new LinearLayout.LayoutParams(-1, dp(200)));
                 copyRow(d, "Token id", tid);
                 if (!n.optString("coinid").isEmpty()) copyRow(d, "Coin id", n.optString("coinid"));
                 final TextView vline = Design.text(this, "verifying on your node…", 12f, Design.DIM(), Design.mono());
                 d.addView(vline, lp(0, 8, 0, 6));
-                d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline)), lph(44, 0, 4, 0, 0));
+                d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline, big)), lph(44, 0, 4, 0, 0));
                 c.addView(d);
-                verifyInto(n, bindHex, vline);
+                verifyInto(n, bindHex, vline, big);              // big image = the proven edition's sealed art
+                renderHeldEditions(d, tid, n.optString("coinid"));   // + any other editions THIS node holds
             }
         }
         body.addView(c, lp(0, 0, 0, 12));
     }
 
-    /** Verify a showcase holding on THIS device's node and write the outcome (with the
-     *  failing-stage reason) into {@code tv}. Green on success, vermilion on failure. */
-    private void verifyInto(final JSONObject n, final String bindHex, final TextView tv) {
+    /** Verify a showcase holding on THIS device's node; write the outcome (with the
+     *  failing-stage reason) into {@code tv}, and on success swap the sealed StateNFT
+     *  edition art from the proof into {@code img} (null to skip). */
+    private void verifyInto(final JSONObject n, final String bindHex, final TextView tv, final ImageView img) {
         if (!nodeUp) { tv.setText("connect a node to verify"); tv.setTextColor(Design.DIM()); return; }
         tv.setText("verifying on your node…"); tv.setTextColor(Design.DIM());
-        NftProof.verify(node, n, bindHex, (ok, reason) -> runOnUiThread(() -> {
+        NftProof.verify(node, n, bindHex, (ok, reason, stateImg) -> runOnUiThread(() -> {
             tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
             tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
+            if (ok && img != null && stateImg != null && !stateImg.isEmpty()) ImageLoader.loadFull(this, stateImg, img);
         }));
+    }
+
+    /** Owner-side gallery: the sealed art of every OTHER edition of this StateNFT the
+     *  viewing node holds (via {@code coins relevant:true tokenid:}). Empty for a viewer
+     *  who owns none — a stranger just sees the single proven edition above. */
+    private void renderHeldEditions(final LinearLayout parent, final String tokenid, final String provenCoinid) {
+        if (!nodeUp || tokenid == null || tokenid.isEmpty()) return;
+        node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject r) {
+                JSONArray arr = r.optJSONArray("response"); if (arr == null) return;
+                final java.util.ArrayList<String> uris = new java.util.ArrayList<>();
+                for (int i = 0; i < arr.length() && uris.size() < 24; i++) {
+                    JSONObject coin = arr.optJSONObject(i); if (coin == null) continue;
+                    if (provenCoinid != null && provenCoinid.equalsIgnoreCase(coin.optString("coinid"))) continue;   // shown as the big image
+                    String u = NftProof.stateImageUri(coin);
+                    if (!u.isEmpty() && !uris.contains(u)) uris.add(u);
+                }
+                if (uris.isEmpty()) return;
+                runOnUiThread(() -> {
+                    parent.addView(Design.text(MainActivity.this, "+ " + uris.size() + " more edition" + (uris.size() == 1 ? "" : "s") + " you hold", 11f, Design.DIM(), Design.mono()), lp(0, 8, 0, 6));
+                    LinearLayout g = null;
+                    for (int i = 0; i < uris.size(); i++) {
+                        if (i % 3 == 0) { g = row(); parent.addView(g, lp(0, 0, 0, 6)); }
+                        ImageView t = new ImageView(MainActivity.this); t.setScaleType(ImageView.ScaleType.CENTER_CROP); t.setBackgroundColor(0xFF141310);
+                        ImageLoader.loadFull(MainActivity.this, uris.get(i), t);
+                        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(100), 1); tp.setMargins(0, 0, i % 3 == 2 ? 0 : dp(6), 0);
+                        g.addView(t, tp);
+                    }
+                    for (int pad = uris.size() % 3; pad != 0 && pad < 3; pad++) g.addView(new View(MainActivity.this), new LinearLayout.LayoutParams(0, dp(100), 1));
+                });
+            }
+            @Override public void onError(String m) {}
+        });
     }
 
     /* ---------------- prove & showcase a holding ---------------- */
