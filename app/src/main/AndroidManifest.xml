@@ -7,6 +7,7 @@
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- cleartext ONLY so a self-hosted kubo IPFS API on the LAN
          (http://192.168.x:5001, no TLS) can be reached; public hosting is https. -->
@@ -31,6 +32,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Closed-app alerts: the core pushes a targeted NOTIFY broadcast on coin arrival. -->
+        <receiver android:name=".SalonNotifyReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="org.minimarex.minimacore.NOTIFY" />
+            </intent-filter>
+        </receiver>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

@@ -136,6 +136,9 @@ public class MainActivity extends AppCompatActivity {
         });
 
         node = new NodeApi(this, enabled -> runOnUiThread(() -> { nodeUp = enabled; onNode(); }));
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 77);
         if (SalonStore.hasIdentity(this)) screen = Screen.HOME;
         render();
     }
