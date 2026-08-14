@@ -539,6 +539,7 @@ public class MainActivity extends AppCompatActivity {
             p.put("links", me.optJSONArray("links") == null ? new JSONArray() : me.optJSONArray("links"));
             p.put("gallery", me.optJSONArray("gallery") == null ? new JSONArray() : me.optJSONArray("gallery"));
             p.put("posts", me.optJSONArray("posts") == null ? new JSONArray() : me.optJSONArray("posts"));
+            p.put("nfts", me.optJSONArray("nfts") == null ? new JSONArray() : me.optJSONArray("nfts"));
         } catch (Exception ignored) {}
         return p;
     }
@@ -787,6 +788,9 @@ public class MainActivity extends AppCompatActivity {
             body.addView(c, lp(0, 0, 0, 12));
         }
 
+        JSONArray nfts = p.optJSONArray("nfts");
+        if (nfts != null && nfts.length() > 0) renderNftShowcase(nfts, p.optString("tokenid"));
+
         if (mine) {
             LinearLayout meta = card(); meta.addView(Design.lot(this, "Your page"));
             copyRow(meta, "Identity token", p.optString("tokenid"));
@@ -794,6 +798,80 @@ public class MainActivity extends AppCompatActivity {
             body.addView(meta, lp(0, 0, 0, 12));
         }
     }
+
+    /** Render showcased holdings; the VIEWER's node verifies each live before the badge. */
+    private void renderNftShowcase(JSONArray nfts, String profileTokenid) {
+        LinearLayout c = card(); c.addView(Design.lot(this, "Holdings"));
+        String bindHex = NftProof.hexOf(profileTokenid);
+        for (int i = 0; i < nfts.length(); i++) {
+            JSONObject n = nfts.optJSONObject(i); if (n == null) continue;
+            LinearLayout r = row(); r.setPadding(0, dp(8), 0, dp(8));
+            ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP); iv.setBackgroundColor(0xFF141310);
+            if (!n.optString("image").isEmpty()) ImageLoader.loadFull(this, n.optString("image"), iv);
+            r.addView(iv, new LinearLayout.LayoutParams(dp(46), dp(46)));
+            LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, dp(8), 0);
+            col.addView(Design.text(this, n.optString("name", Util.shorten(n.optString("tokenid"))), 15, Design.INK(), Design.sansBold()));
+            final TextView badge = Design.text(this, "verifying on your node…", 11f, Design.DIM(), Design.mono());
+            col.addView(badge);
+            r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+            c.addView(r);
+            if (nodeUp) NftProof.verify(node, n, bindHex, ok -> runOnUiThread(() -> {
+                badge.setText(ok ? "✓ VERIFIED HOLDING" : "✕ could not verify");
+                badge.setTextColor(ok ? 0xFF1F7A3F : Design.DIM());
+            }));
+            else badge.setText("connect a node to verify");
+        }
+        body.addView(c, lp(0, 0, 0, 12));
+    }
+
+    /* ---------------- prove & showcase a holding ---------------- */
+
+    private void pickNftDialog() {
+        if (!nodeUp) { toast("Connect the node."); return; }
+        toast("Reading your wallet…");
+        node.cmd("balance", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                JSONArray arr = j.optJSONArray("response");
+                java.util.List<JSONObject> assets = new java.util.ArrayList<>();
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject row = arr.optJSONObject(i); if (row == null) continue;
+                    String tid = row.optString("tokenid", ""); if (tid.isEmpty() || tid.equals("0x00")) continue;
+                    Object tok = row.opt("token"); String name = "", image = "";
+                    if (tok instanceof JSONObject) {
+                        JSONObject tm = (JSONObject) tok;
+                        Object nm = tm.opt("name"); name = nm instanceof JSONObject ? ((JSONObject) nm).optString("name", "") : tm.optString("name", "");
+                        image = firstNonEmpty(tm.optString("url"), tm.optString("icon"), tm.optString("image"));
+                    } else if (tok instanceof String) name = (String) tok;
+                    if (name.isEmpty()) name = Util.shorten(tid);
+                    try { JSONObject a = new JSONObject(); a.put("tokenid", tid); a.put("name", name); a.put("image", image); assets.add(a); } catch (Exception ignored) {}
+                }
+                runOnUiThread(() -> showAssetPicker(assets));
+            }
+            @Override public void onError(String m) { runOnUiThread(() -> toast("Balance failed: " + m)); }
+        });
+    }
+
+    private void showAssetPicker(java.util.List<JSONObject> assets) {
+        if (assets.isEmpty()) { toast("No tokens/NFTs in your wallet to prove."); return; }
+        CharSequence[] items = new CharSequence[assets.size()];
+        for (int i = 0; i < assets.size(); i++) items[i] = assets.get(i).optString("name");
+        new android.app.AlertDialog.Builder(this).setTitle("Prove a holding").setItems(items, (d, which) -> proveNft(assets.get(which))).show();
+    }
+
+    private void proveNft(JSONObject asset) {
+        String myTid = SalonStore.get(this, "tokenid");
+        if (myTid.isEmpty()) { toast("Claim your Salon first."); return; }
+        toast("Generating on-chain proof…");
+        NftProof.generate(node, asset.optString("tokenid"), NftProof.hexOf(myTid), new NftProof.Gen() {
+            @Override public void ok(JSONObject item) {
+                try { item.put("name", asset.optString("name")); item.put("image", asset.optString("image")); } catch (Exception ignored) {}
+                runOnUiThread(() -> { JSONArray a = SalonStore.arr(MainActivity.this, "nfts"); a.put(item); SalonStore.setArr(MainActivity.this, "nfts", a); toast("Proof added — Save & publish to show it."); render(); });
+            }
+            @Override public void fail(String msg) { runOnUiThread(() -> toast("Couldn't prove: " + msg)); }
+        });
+    }
+
+    private String firstNonEmpty(String... xs) { for (String x : xs) if (x != null && !x.isEmpty()) return x; return ""; }
 
     /* ================= EDIT hub ================= */
 
@@ -861,6 +939,20 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout postCard = card(); postCard.addView(Design.lot(this, "Posts"));
         postCard.addView(btn("+ New post", false, this::newPostDialog), lph(42, 0, 6, 0, 2));
         body.addView(postCard, lp(0, 0, 0, 12));
+
+        // Showcase NFTs — proven holdings (no faking)
+        LinearLayout nftCard = card(); nftCard.addView(Design.lot(this, "Showcase — proven holdings"));
+        nftCard.addView(Design.note(this, "Prove you HOLD an NFT or token and show it on your page. Viewers' own nodes verify it live — a hosted list can't fake it, and the badge vanishes if you sell."), lp(0, 4, 0, 6));
+        JSONArray nfts = SalonStore.arr(this, "nfts");
+        for (int i = 0; i < nfts.length(); i++) {
+            JSONObject n = nfts.optJSONObject(i); if (n == null) continue; final int idx = i;
+            LinearLayout r = row(); r.setPadding(0, dp(6), 0, dp(6));
+            r.addView(Design.text(this, n.optString("name", Util.shorten(n.optString("tokenid"))), 13.5f, Design.INK(), Design.sansBold()), new LinearLayout.LayoutParams(0, -2, 1));
+            r.addView(btn("✕", false, () -> { SalonStore.setArr(this, "nfts", removeAt(SalonStore.arr(this, "nfts"), idx)); render(); }), new LinearLayout.LayoutParams(dp(44), dp(38)));
+            nftCard.addView(r);
+        }
+        nftCard.addView(btn("+ Prove & add a holding", false, this::pickNftDialog), lph(44, 0, 6, 0, 2));
+        body.addView(nftCard, lp(0, 0, 0, 12));
 
         profStatus = Design.note(this, ""); body.addView(profStatus, lp(0, 4, 0, 0));
         body.addView(btn("Save & publish", true, () -> {
