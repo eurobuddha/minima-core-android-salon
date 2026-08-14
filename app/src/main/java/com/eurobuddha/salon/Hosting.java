@@ -186,10 +186,13 @@ final class Hosting {
         }
     }
 
-    /** Single-file transport. putFile returns the PUBLIC URL. */
-    interface Uploader {
+    /** Single-file transport. putFile returns the PUBLIC URL. AutoCloseable so a stateful
+     *  transport (SFTP holds an SSH session) is released via try-with-resources; the
+     *  stateless HTTP uploaders inherit the no-op default. */
+    interface Uploader extends AutoCloseable {
         String putFile(byte[] bytes, String relPath, String mime) throws HostingException;
         boolean exists(String relPath) throws HostingException;
+        @Override default void close() {}
     }
 
     /** Directory transport (IPFS backends): one call, one CID, base URL back. */

@@ -34,8 +34,16 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context ctx, Intent intent) {
         if (!Objects.equals(intent.getAction(), MinimaAPIMessages.MINIMA_API_NOTIFY)) return;
         if (!MinimaAPI.checkMinimaID(ctx, intent)) return;   // only our paired node
-        String message = intent.getStringExtra(MinimaAPIMessages.MINIMA_API_NOTIFY_DATA);
+        final String message = intent.getStringExtra(MinimaAPIMessages.MINIMA_API_NOTIFY_DATA);
         if (message == null) return;
+        // In-app libsodium decrypt + SQLite are too heavy for the broadcast thread's ANR
+        // budget (esp. first-run native-lib load) — hand off and finish asynchronously.
+        final PendingResult pr = goAsync();
+        final Context app = ctx.getApplicationContext();
+        new Thread(() -> { try { process(app, message); } catch (Exception ignored) {} finally { pr.finish(); } }).start();
+    }
+
+    private void process(Context ctx, String message) {
         try {
             JSONObject j = new JSONObject(message);
             String event = j.optString("event", "");

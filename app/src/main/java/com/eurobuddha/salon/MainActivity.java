@@ -138,15 +138,18 @@ public class MainActivity extends AppCompatActivity {
         });
 
         node = new NodeApi(this, enabled -> runOnUiThread(() -> { nodeUp = enabled; onNode(); }));
+        startPairingRetry();   // re-broadcast REGISTER while unpaired (recovers if Salon starts before Minima Core, e.g. after reboot)
         if (android.os.Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 77);
         if (SalonStore.hasIdentity(this)) screen = Screen.HOME;
         render();
+        refreshUnread();   // seed the nav badge without a UI-thread DB query
     }
 
     private void onNode() {
         if (nodeChip != null) nodeChip.setText(nodeUp ? "connected" : "no node");
+        if (!nodeUp) startPairingRetry();   // keep re-registering after a disconnect
         if (nodeUp && pubkey.isEmpty()) fetchPubkey();
         if (nodeUp && !adoptChecked && !claiming && !SalonStore.hasIdentity(this)) {
             adoptChecked = true;
@@ -203,7 +206,7 @@ public class MainActivity extends AppCompatActivity {
     private void scanMail() {
         final String addr = SalonStore.get(this, "tipaddr");
         if (addr.isEmpty()) return;
-        MinimaMail.scan(node, SalonComms.crypto(this), addr, msgs -> runOnUiThread(() -> {
+        MinimaMail.scan(node, SalonComms.crypto(this), addr, msgs -> io.execute(() -> {   // DB writes off the UI thread
             MailDb db = MailDb.get(MainActivity.this);
             int newCount = 0; String lastFrom = "", lastBody = "";
             for (MinimaMail.Msg m : msgs) {
@@ -216,11 +219,21 @@ public class MainActivity extends AppCompatActivity {
                     newCount++; lastFrom = m.fromHandle; lastBody = preview;
                 }
             }
-            if (newCount > 0) {
-                if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
-                else { buildNav(); toast("💬 " + (newCount == 1 ? "@" + lastFrom.replaceFirst("^@", "") + ": " + lastBody : newCount + " new messages")); }
-            }
+            final int fc = newCount; final String lf = lastFrom, lb = lastBody; final int unread = db.totalUnread();
+            runOnUiThread(() -> {
+                unreadCache = unread;
+                if (fc > 0) {
+                    if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
+                    else { buildNav(); toast("💬 " + (fc == 1 ? "@" + lf.replaceFirst("^@", "") + ": " + lb : fc + " new messages")); }
+                } else buildNav();
+            });
         }));
+    }
+
+    private int unreadCache = 0;
+    /** Refresh the cached unread count off the UI thread and repaint the nav badge. */
+    private void refreshUnread() {
+        io.execute(() -> { int u = MailDb.get(MainActivity.this).totalUnread(); runOnUiThread(() -> { unreadCache = u; if (navRow != null) buildNav(); }); });
     }
 
     /** Detect inbound tips at our address and announce new ones. Baselines silently
@@ -338,6 +351,7 @@ public class MainActivity extends AppCompatActivity {
         db.upsertContact(peerpk, handle, avatar, addr, ex != null ? ex.lastbody : "", ex != null ? ex.lastts : 0, false);
         threadPeer = peerpk;
         db.clearUnread(peerpk);
+        refreshUnread();
         go(Screen.THREAD);
     }
 
@@ -374,7 +388,7 @@ public class MainActivity extends AppCompatActivity {
         MailDb.Contact ct = db.contact(threadPeer);
         String handle = ct != null && ct.handle != null ? ct.handle.replaceFirst("^@", "") : "chat";
         masthead("@" + handle);
-        db.clearUnread(threadPeer);
+        db.clearUnread(threadPeer); refreshUnread();
         LinearLayout bar = row();
         bar.addView(btn("← Messages", false, () -> go(Screen.MESSAGES)), weight(46, 0, 0));
         body.addView(bar, lp(0, 0, 0, 8));
@@ -560,7 +574,21 @@ public class MainActivity extends AppCompatActivity {
     private void touchRef(String u) { if (RelayResolver.isRelayRef(u)) RelayResolver.touch(u); }
     private void touchArr(JSONArray a, String key) { if (a == null) return; for (int i = 0; i < a.length(); i++) { JSONObject o = a.optJSONObject(i); if (o != null) touchRef(o.optString(key, "")); } }
 
-    @Override protected void onDestroy() { super.onDestroy(); io.shutdownNow(); stopAudio(); }
+    private final android.os.Handler pairHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable pairTick = new Runnable() {
+        @Override public void run() {
+            if (node != null && !node.isEnabled()) { node.reRegister(); pairHandler.postDelayed(this, 5000); }
+        }
+    };
+    private void startPairingRetry() { pairHandler.removeCallbacks(pairTick); pairHandler.postDelayed(pairTick, 3000); }
+
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        pairHandler.removeCallbacks(pairTick);
+        io.shutdownNow();
+        stopAudio();
+        if (node != null) node.onDestroy();   // release the MinimaAPI receiver + cancel pending IPC timeouts
+    }
 
     /* ---------------- chrome + nav ---------------- */
 
@@ -571,8 +599,7 @@ public class MainActivity extends AppCompatActivity {
         tabs.addView(navTab("Feed", screen == Screen.FEED, () -> go(Screen.FEED)), weight1());
         tabs.addView(navTab("Discover", screen == Screen.DISCOVER || screen == Screen.VIEW, () -> go(Screen.DISCOVER)), weight1());
         tabs.addView(navTab("Salon", screen == Screen.HOME || screen == Screen.ONBOARD || screen == Screen.EDIT, () -> go(Screen.HOME)), weight1());
-        int unread = 0; try { unread = MailDb.get(this).totalUnread(); } catch (Exception ignored) {}
-        tabs.addView(navTabBadge("Messages", screen == Screen.MESSAGES || screen == Screen.THREAD, unread, () -> go(Screen.MESSAGES)), weight1());
+        tabs.addView(navTabBadge("Messages", screen == Screen.MESSAGES || screen == Screen.THREAD, unreadCache, () -> go(Screen.MESSAGES)), weight1());   // cached; refreshed off the UI thread
         tabs.addView(navTab("Settings", screen == Screen.SETTINGS || screen == Screen.HOSTING || screen == Screen.HOSTING_EDIT, () -> go(Screen.SETTINGS)), weight1());
         navRow.addView(tabs, new LinearLayout.LayoutParams(-1, -2));
     }
@@ -611,7 +638,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void go(Screen s) { screen = s; render(); }   // audio keeps playing across screens
 
+    private int renderEpoch = 0;   // bumped every render(); async painters bail if it moved (stale screen)
     private void render() {
+        renderEpoch++;
         buildNav(); body.removeAllViews();
         switch (screen) {
             case FEED:         renderFeed(); break;
@@ -654,8 +683,7 @@ public class MainActivity extends AppCompatActivity {
         if (status != null) status.setText("Publishing your page…");
         JSONObject profile = buildProfileJson();
         io.execute(() -> {
-            try {
-                Hosting.Uploader up = Hosting.forProfile(def);
+            try (Hosting.Uploader up = Hosting.forProfile(def)) {
                 String url = up.putFile(profile.toString().getBytes("UTF-8"), handle + "/profile.json", "application/json");
                 // The encrypted relay isn't a web host — skip the browser renderer there.
                 if (!Hosting.TYPE_RELAY.equals(def.type()))
@@ -686,7 +714,8 @@ public class MainActivity extends AppCompatActivity {
         TextView status = Design.note(this, "Pulling posts from " + follows.length() + " salon(s)…");
         body.addView(status, lp(0, 0, 0, 8));
         final List<JSONObject> posts = Collections.synchronizedList(new ArrayList<>());
-        final int[] pending = { follows.length() };
+        final int[] pending = { follows.length() }, fails = { 0 };
+        final int ep = renderEpoch;
         for (int i = 0; i < follows.length(); i++) {
             JSONObject f = follows.optJSONObject(i);
             if (f == null) { pending[0]--; continue; }
@@ -702,16 +731,24 @@ public class MainActivity extends AppCompatActivity {
                         try { post.put("_author", author.isEmpty() ? prof.optString("handle") : author); post.put("_avatar", avatar); post.put("_tid", tid); } catch (Exception ignored) {}
                         posts.add(post);
                     }
-                }
-                runOnUiThread(() -> { if (--pending[0] == 0) paintFeed(posts, status); });
+                } else fails[0]++;
+                runOnUiThread(() -> { if (--pending[0] == 0 && ep == renderEpoch) paintFeed(posts, status, fails[0]); });
             });
         }
     }
 
-    private void paintFeed(List<JSONObject> posts, TextView status) {
+    private void paintFeed(List<JSONObject> posts, TextView status, int fails) {
         Collections.sort(posts, (a, b) -> Long.compare(b.optLong("ts", 0), a.optLong("ts", 0)));
         body.removeView(status);
-        if (posts.isEmpty()) { body.addView(Design.note(this, "No posts yet from anyone you follow."), lp(0, 0, 0, 12)); return; }
+        if (posts.isEmpty()) {
+            if (fails > 0) {
+                LinearLayout c = card();
+                c.addView(Design.note(this, "Couldn't reach " + fails + " of the salons you follow — they may be offline."));
+                c.addView(btn("Try again", true, this::render), lph(46, 0, 10, 0, 0));
+                body.addView(c, lp(0, 0, 0, 12));
+            } else body.addView(Design.note(this, "No posts yet from anyone you follow."), lp(0, 0, 0, 12));
+            return;
+        }
         for (JSONObject post : posts) {
             LinearLayout c = card();
             LinearLayout head = row();
@@ -737,7 +774,9 @@ public class MainActivity extends AppCompatActivity {
         TextView status = Design.note(this, "Reading the square…");
         body.addView(status, lp(0, 0, 0, 8));
         if (!nodeUp) { status.setText("Waiting for Minima Core."); return; }
+        final int ep = renderEpoch;
         SalonRegistry.list(node, entries -> runOnUiThread(() -> {
+            if (ep != renderEpoch) return;   // user navigated away before the square loaded
             body.removeView(status);
             if (entries.isEmpty()) { body.addView(Design.note(this, "The square is empty — be the first. Publish your Salon from My Salon."), lp(0, 0, 0, 12)); return; }
             for (SalonRegistry.Entry e : entries) {
@@ -915,7 +954,7 @@ public class MainActivity extends AppCompatActivity {
             final boolean open = tid != null && tid.equals(expandedNft);
             LinearLayout r = row(); r.setPadding(0, dp(8), 0, dp(8)); r.setClickable(true);
             ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP); iv.setBackgroundColor(0xFF141310);
-            if (!n.optString("image").isEmpty()) ImageLoader.loadFull(this, n.optString("image"), iv);
+            if (!n.optString("image").isEmpty()) ImageLoader.loadOver(this, n.optString("image"), iv);
             r.addView(iv, new LinearLayout.LayoutParams(dp(46), dp(46)));
             LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, dp(8), 0);
             col.addView(Design.text(this, n.optString("name", Util.shorten(tid)), 15, Design.INK(), Design.sansBold()));
@@ -1003,7 +1042,7 @@ public class MainActivity extends AppCompatActivity {
                                 if (i % 2 == 0) { g = row(); parent.addView(g, lp(0, 0, 0, 6)); }
                                 ImageView t = new ImageView(MainActivity.this); t.setScaleType(ImageView.ScaleType.CENTER_CROP); t.setBackgroundColor(0xFF141310);
                                 t.setClickable(true); t.setOnClickListener(v -> openCarousel(editions, idx));
-                                ImageLoader.loadFull(MainActivity.this, editions.get(i).optString("url"), t);
+                                ImageLoader.loadOver(MainActivity.this, editions.get(i).optString("url"), t);
                                 LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(168), 1); tp.setMargins(0, 0, i % 2 == 0 ? dp(6) : 0, 0);
                                 g.addView(t, tp);
                             }
@@ -1239,7 +1278,8 @@ public class MainActivity extends AppCompatActivity {
                 else if (r == PICK_GALLERY_AUD) { bytes = readCapped(uri, 25); ext = ".mp3"; mime = "audio/mpeg"; kind = "audio"; }
                 else { bytes = readScaledJpeg(uri, r == PICK_AVATAR ? 640 : 1400); ext = ".jpg"; mime = "image/jpeg"; kind = "image"; }
                 String rel = handle + "/media/" + kind + "-" + Long.toString(System.currentTimeMillis(), 36) + ext;
-                String url = Hosting.forProfile(def).putFile(bytes, rel, mime);
+                final String url;
+                try (Hosting.Uploader up = Hosting.forProfile(def)) { url = up.putFile(bytes, rel, mime); }
                 runOnUiThread(() -> {
                     if (r == PICK_AVATAR && edAvatar != null) { edAvatar.setText(url); SalonStore.put(this, "avatar", url); render(); }
                     else if (r == PICK_BANNER && edBanner != null) { edBanner.setText(url); SalonStore.put(this, "banner", url); render(); }
@@ -1291,7 +1331,7 @@ public class MainActivity extends AppCompatActivity {
         if ("image".equals(type)) {
             ImageView iv = new ImageView(this); iv.setAdjustViewBounds(true); iv.setMaxHeight(dp(360)); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
             iv.setBackgroundColor(0xFF141310);
-            if (!url.isEmpty()) ImageLoader.loadFull(this, url, iv);
+            if (!url.isEmpty()) ImageLoader.loadOver(this, url, iv);   // list preview — tap opens full-res
             iv.setClickable(true); iv.setOnClickListener(v -> openImage(url));
             col.addView(iv, new LinearLayout.LayoutParams(-1, -2));
         } else if ("video".equals(type)) {
@@ -1339,6 +1379,7 @@ public class MainActivity extends AppCompatActivity {
         fl.addView(vv, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         d.setContentView(fl); d.show();
         vv.setOnPreparedListener(mp -> { mp.setLooping(false); vv.start(); mc.show(0); });
+        d.setOnDismissListener(x -> vv.stopPlayback());   // release the player so audio doesn't keep running after Back
     }
 
     /* ---------- gallery as a collection: photo grid, video carousel, playlist ---------- */
@@ -1370,7 +1411,7 @@ public class MainActivity extends AppCompatActivity {
             if (i % 2 == 0) { r = new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); grid.addView(r, lp(0, 0, 0, 8)); }
             LinearLayout cell = new LinearLayout(this); cell.setOrientation(LinearLayout.VERTICAL);
             ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP); iv.setBackgroundColor(0xFF141310);
-            if (!m.optString("url").isEmpty()) ImageLoader.loadFull(this, m.optString("url"), iv);
+            if (!m.optString("url").isEmpty()) ImageLoader.loadOver(this, m.optString("url"), iv);
             iv.setClickable(true); iv.setOnClickListener(v -> openCarousel(photos, idx));
             cell.addView(iv, new LinearLayout.LayoutParams(-1, dp(150)));
             String cap = m.optString("caption", "");
@@ -1560,7 +1601,7 @@ public class MainActivity extends AppCompatActivity {
         if (url != null && !url.isEmpty()) {
             ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
             iv.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
-            ImageLoader.loadFull(this, url, iv);
+            ImageLoader.loadOver(this, url, iv);   // thumbnail size — avatars are small, don't decode 1800px
             iv.setLayoutParams(new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
             return iv;
         }
@@ -1620,10 +1661,12 @@ public class MainActivity extends AppCompatActivity {
         io.execute(() -> {
             try {
                 JSONObject profile = buildProfileJson();
-                Hosting.Uploader up = Hosting.forProfile(def);
-                String profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), h + "/profile.json", "application/json");
-                if (!Hosting.TYPE_RELAY.equals(def.type()))
-                    try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
+                final String profileUrl;
+                try (Hosting.Uploader up = Hosting.forProfile(def)) {
+                    profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), h + "/profile.json", "application/json");
+                    if (!Hosting.TYPE_RELAY.equals(def.type()))
+                        try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
+                }
                 Hosting.verifyUrl(profileUrl, def);
                 runOnUiThread(() -> { SalonStore.put(this, "profileUrl", profileUrl); status.setText("Page live. Checking identity…"); adoptOrMint(h, n, b, profileUrl, status); });
             } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> { promptTrustHostKey(def, hk.fingerprint, status); claimFailed(); }); }
@@ -1899,7 +1942,8 @@ public class MainActivity extends AppCompatActivity {
         io.execute(() -> {
             String msg;
             try { String rel = "_test/probe-" + Long.toString(System.currentTimeMillis(), 36) + ".txt";
-                String url = Hosting.forProfile(p).putFile(("salon-test").getBytes("UTF-8"), rel, "text/plain"); Hosting.verifyUrl(url, p); msg = "OK — uploaded and served: " + url;
+                String url; try (Hosting.Uploader up = Hosting.forProfile(p)) { url = up.putFile(("salon-test").getBytes("UTF-8"), rel, "text/plain"); }
+                Hosting.verifyUrl(url, p); msg = "OK — uploaded and served: " + url;
             } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> promptTrustHostKey(p, hk.fingerprint, status)); return;
             } catch (Exception e) { msg = "Failed: " + e.getMessage(); }
             final String m = msg; runOnUiThread(() -> { if (status != null) status.setText(m); else toast(m); });
