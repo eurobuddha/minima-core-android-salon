@@ -22,18 +22,22 @@ final class MailDb extends SQLiteOpenHelper {
         return INSTANCE;
     }
 
-    private MailDb(Context c) { super(c, "salon_mail", null, 1); }
+    private MailDb(Context c) { super(c, "salon_mail", null, 2); }
 
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE contacts(peerpk TEXT PRIMARY KEY, handle TEXT, avatar TEXT, addr TEXT, "
-                + "lastbody TEXT, lastts INTEGER, unread INTEGER DEFAULT 0)");
+                + "mxaddr TEXT, lastbody TEXT, lastts INTEGER, unread INTEGER DEFAULT 0)");
         db.execSQL("CREATE TABLE messages(coinid TEXT PRIMARY KEY, peerpk TEXT, mine INTEGER, body TEXT, "
                 + "media TEXT, mime TEXT, ts INTEGER, valid INTEGER)");
         db.execSQL("CREATE INDEX ix_msg_peer ON messages(peerpk, ts)");
     }
-    @Override public void onUpgrade(SQLiteDatabase db, int o, int n) {}
+    @Override public void onUpgrade(SQLiteDatabase db, int o, int n) {
+        // v2: the peer's Maxima addresses (CSV), learned from their profile.json.
+        // Presence of mxaddr is what makes a contact Maxima-capable for DMs.
+        if (o < 2) db.execSQL("ALTER TABLE contacts ADD COLUMN mxaddr TEXT");
+    }
 
-    static final class Contact { String peerpk, handle, avatar, addr, lastbody; long lastts; int unread; }
+    static final class Contact { String peerpk, handle, avatar, addr, mxaddr, lastbody; long lastts; int unread; }
     static final class Message { String coinid, peerpk, body, media, mime; boolean mine, valid; long ts; }
 
     /** Insert a message; returns true if new (dedup by coinid). */
@@ -68,11 +72,12 @@ final class MailDb extends SQLiteOpenHelper {
     List<Contact> contacts() {
         List<Contact> out = new ArrayList<>();
         Cursor cur = getReadableDatabase().rawQuery(
-                "SELECT peerpk,handle,avatar,addr,lastbody,lastts,unread FROM contacts ORDER BY lastts DESC", null);
+                "SELECT peerpk,handle,avatar,addr,mxaddr,lastbody,lastts,unread FROM contacts ORDER BY lastts DESC", null);
         while (cur.moveToNext()) {
             Contact c = new Contact();
             c.peerpk = cur.getString(0); c.handle = cur.getString(1); c.avatar = cur.getString(2);
-            c.addr = cur.getString(3); c.lastbody = cur.getString(4); c.lastts = cur.getLong(5); c.unread = cur.getInt(6);
+            c.addr = cur.getString(3); c.mxaddr = cur.getString(4);
+            c.lastbody = cur.getString(5); c.lastts = cur.getLong(6); c.unread = cur.getInt(7);
             out.add(c);
         }
         cur.close();
@@ -81,11 +86,12 @@ final class MailDb extends SQLiteOpenHelper {
 
     Contact contact(String peerpk) {
         Cursor cur = getReadableDatabase().rawQuery(
-                "SELECT peerpk,handle,avatar,addr,lastbody,lastts,unread FROM contacts WHERE peerpk=?", new String[]{peerpk});
+                "SELECT peerpk,handle,avatar,addr,mxaddr,lastbody,lastts,unread FROM contacts WHERE peerpk=?", new String[]{peerpk});
         Contact c = null;
         if (cur.moveToFirst()) {
             c = new Contact(); c.peerpk = cur.getString(0); c.handle = cur.getString(1); c.avatar = cur.getString(2);
-            c.addr = cur.getString(3); c.lastbody = cur.getString(4); c.lastts = cur.getLong(5); c.unread = cur.getInt(6);
+            c.addr = cur.getString(3); c.mxaddr = cur.getString(4);
+            c.lastbody = cur.getString(5); c.lastts = cur.getLong(6); c.unread = cur.getInt(7);
         }
         cur.close();
         return c;
@@ -104,6 +110,16 @@ final class MailDb extends SQLiteOpenHelper {
         }
         cur.close();
         return out;
+    }
+
+    /** Record (or clear, with "") the peer's Maxima addresses from their profile. */
+    void setMxAddr(String peerpk, String mxaddr) {
+        ContentValues v = new ContentValues();
+        v.put("peerpk", peerpk);
+        v.put("mxaddr", mxaddr == null ? "" : mxaddr);
+        SQLiteDatabase db = getWritableDatabase();
+        db.insertWithOnConflict("contacts", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+        db.update("contacts", v, "peerpk=?", new String[]{peerpk});
     }
 
     void clearUnread(String peerpk) {

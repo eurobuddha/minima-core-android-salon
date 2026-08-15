@@ -67,23 +67,46 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
     }
 
     private void handleDm(Context ctx, JSONObject coin, String s99) {
+        intakeDm(ctx, s99, coin.optString("coinid", ""));
+    }
+
+    /**
+     * The ONE inbound-DM path, shared by both transports: on-chain coins
+     * (state[99] via the core's NOTIFY broadcast or a scan) and Maxima
+     * deliveries ({@link MaximaLinkReceiver}). The payload is the identical
+     * libsodium-sealed blob either way, so sender authenticity (the msgpk the
+     * thread is keyed on) is verified by the same signature check regardless of
+     * which pipe carried it.
+     *
+     * @param sealedHex the sealed blob, hex with or without 0x
+     * @param msgId     dedup id — a coinid on-chain, "mx-&lt;msgid&gt;" over Maxima
+     * @return true if this was a valid, NEW message
+     */
+    static boolean intakeDm(Context ctx, String sealedHex, String msgId) {
         try {
-            String hex = (s99.startsWith("0x") || s99.startsWith("0X")) ? s99.substring(2) : s99;
+            String hex = (sealedHex.startsWith("0x") || sealedHex.startsWith("0X"))
+                    ? sealedHex.substring(2) : sealedHex;
             Opened o = SalonComms.crypto(ctx).open(hex);
-            if (o == null || !o.valid) return;   // not a DM for us, or sender signature doesn't verify (anti-impersonation)
+            if (o == null || !o.valid) return false;   // not for us, or signature fails (anti-impersonation)
             JSONObject m = new JSONObject(new String(o.plaintext, StandardCharsets.UTF_8));
             String from = m.optString("from", "someone"), body = m.optString("body", ""), media = m.optString("media", "");
             String preview = !body.isEmpty() ? body : (!media.isEmpty() ? "📎 media" : "");
-            String coinid = coin.optString("coinid", "");
-            boolean isNew = MailDb.get(ctx).insert(coinid, o.fromPublicId, false, body, media, m.optString("mime", ""), m.optLong("ts", 0), o.valid);
+            boolean isNew = MailDb.get(ctx).insert(msgId, o.fromPublicId, false, body, media, m.optString("mime", ""), m.optLong("ts", 0), o.valid);
             if (isNew) {
                 MailDb.get(ctx).upsertContact(o.fromPublicId, from, "", m.optString("addr", ""), preview, m.optLong("ts", 0), true);
-                notify(ctx, "💬 @" + from.replaceFirst("^@", ""), preview);
+                notifyStatic(ctx, "💬 @" + from.replaceFirst("^@", ""), preview);
             }
-        } catch (Exception ignored) {}
+            return isNew;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private void notify(Context ctx, String title, String text) {
+        notifyStatic(ctx, title, text);
+    }
+
+    static void notifyStatic(Context ctx, String title, String text) {
         NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm != null) {
             nm.createNotificationChannel(new NotificationChannel(CHANNEL, "Salon activity", NotificationManager.IMPORTANCE_HIGH));

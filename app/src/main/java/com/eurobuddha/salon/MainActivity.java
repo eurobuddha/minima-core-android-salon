@@ -99,6 +99,11 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(b);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
 
+        // Maxima transport handshake: register (wakes it), subscribe our DM
+        // channel, cache our addresses. Idempotent, fire-and-forget - the app
+        // works fully without Maxima (on-chain DMs), this just upgrades it.
+        MaximaLink.connect(this);
+
         rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(Design.PAPER());
         LinearLayout chrome = new LinearLayout(this);
@@ -475,6 +480,43 @@ public class MainActivity extends AppCompatActivity {
         db.insert("me-" + System.currentTimeMillis() + "-" + Math.abs(body.hashCode()), threadPeer, true, body, mediaRef, mediaMime, ts, true);
         db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
         render();
+
+        // DUAL PATH. Maxima first when both sides speak it: free, instant,
+        // off-chain, nothing on the public ledger. The dust-coin path is the
+        // fallback (and the whole path for peers with no Maxima) - the same
+        // sealed blob rides either pipe, so sender verification is identical.
+        boolean viaMaxima = MaximaLink.isReady(this)
+                && ct.mxaddr != null && !ct.mxaddr.isEmpty();
+        if (viaMaxima) {
+            final String sealedHex;
+            String tmp;
+            try {
+                tmp = SalonComms.crypto(this).seal(threadPeer,
+                        msg.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                tmp = null;
+            }
+            sealedHex = tmp;
+            if (sealedHex != null) {
+                MaximaLink.sendDm(this, ct.mxaddr, sealedHex, new MaximaLink.SendCb() {
+                    @Override public void onSent(String status, boolean pending) {
+                        runOnUiThread(() -> toast(pending
+                                ? "Sent ✓ (held until they're online)" : "Sent ✓"));
+                    }
+                    @Override public void onFailed(String error) {
+                        // Fall back to the chain - slower, but it always lands.
+                        runOnUiThread(() -> toast("Sending on-chain instead…"));
+                        coinSendDm(ct, msg);
+                    }
+                });
+                return;
+            }
+        }
+        coinSendDm(ct, msg);
+    }
+
+    /** The classic path: a 0.001 dust coin with the sealed DM in state[99]. */
+    private void coinSendDm(MailDb.Contact ct, JSONObject msg) {
         MinimaMail.send(node, SalonComms.crypto(this), ct.addr, threadPeer, msg, new MinimaMail.Cb() {
             @Override public void onSent(String txpowid) { runOnUiThread(() -> toast("Sent ⛏ (mining)")); }
             @Override public void onFailed(String m) { runOnUiThread(() -> toast("Send failed: " + m)); }
@@ -741,6 +783,10 @@ public class MainActivity extends AppCompatActivity {
         putJson(p, "v", "1");
         for (String k : new String[]{"handle","name","bio","about","avatar","banner","tokenid","webvalidate","tipaddr","msgpk"})
             putJson(p, k, me.optString(k, ""));
+        // Our Maxima addresses (CSV): how peers reach us for instant off-chain
+        // DMs. Absent = this Salon has no Maxima yet; peers fall back on-chain.
+        String mx = MaximaLink.myAddresses(this);
+        if (!mx.isEmpty()) putJson(p, "mxaddr", mx);
         putJson(p, "updated", Long.toString(System.currentTimeMillis() / 1000));
         try {
             p.put("links", me.optJSONArray("links") == null ? new JSONArray() : me.optJSONArray("links"));
@@ -935,10 +981,16 @@ public class MainActivity extends AppCompatActivity {
         }
         String tipAddr = viewProfile.optString("tipaddr", "");
         String peerMsgpk = viewProfile.optString("msgpk", "");
+        String peerMx = viewProfile.optString("mxaddr", "");
         boolean canMsg = !tipAddr.isEmpty() && !peerMsgpk.isEmpty();
         if (!tipAddr.isEmpty()) {
             LinearLayout arow = row();
-            if (canMsg) arow.addView(btn("💬 Message", true, () -> openThread(peerMsgpk, viewEntry.handle, viewProfile.optString("avatar", ""), tipAddr)), weight(46, 0, 4));
+            if (canMsg) arow.addView(btn("💬 Message", true, () -> {
+                // Remember how to reach them over Maxima (fresh from their page);
+                // "" clears it if they stopped publishing one.
+                MailDb.get(this).setMxAddr(peerMsgpk, peerMx);
+                openThread(peerMsgpk, viewEntry.handle, viewProfile.optString("avatar", ""), tipAddr);
+            }), weight(46, 0, 4));
             arow.addView(btn("💰 Tip", false, () -> tipDialog(viewEntry.handle, tipAddr)), weight(46, canMsg ? 4 : 0, 0));
             body.addView(arow, lp(0, 0, 0, 10));
         }

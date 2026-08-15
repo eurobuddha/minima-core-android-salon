@@ -4,10 +4,14 @@
 
     <queries>
         <package android:name="org.minimarex.minimacore" />
+        <!-- the Maxima transport (DMs over the decentralised comms layer) -->
+        <package android:name="com.eurobuddha.maxima.app" />
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- signature-level: only family-signed apps can hold it -->
+    <uses-permission android:name="com.eurobuddha.maxima.app.permission.USE_MAXIMA" />
 
     <!-- cleartext ONLY so a self-hosted kubo IPFS API on the LAN
          (http://192.168.x:5001, no TLS) can be reached; public hosting is https. -->
@@ -36,6 +40,17 @@
         <receiver android:name=".SalonNotifyReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="org.minimarex.minimacore.NOTIFY" />
+            </intent-filter>
+        </receiver>
+        <!-- The Maxima transport talks back here (replies, inbound DMs, events).
+             Guarded by Maxima's signature permission: only family-signed apps
+             can feed it, so DELIVER cannot be forged by a third party. -->
+        <receiver android:name=".MaximaLinkReceiver" android:exported="true"
+            android:permission="com.eurobuddha.maxima.app.permission.USE_MAXIMA">
+            <intent-filter>
+                <action android:name="com.eurobuddha.maxima.app.RESPONSE" />
+                <action android:name="com.eurobuddha.maxima.app.DELIVER" />
+                <action android:name="com.eurobuddha.maxima.app.EVENT" />
             </intent-filter>
         </receiver>
         <provider
