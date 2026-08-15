@@ -176,17 +176,18 @@ public class MainActivity extends AppCompatActivity {
                 @Override public void onError(String m) {}
             });
         }
-        // Gossip mesh: once per session, re-post any faded pointer (own + a few
-        // others) so the square stays alive collectively. Gated on the on-chain
-        // fade check inside keepAlive, so it no-ops unless something has faded.
+        // One-time-per-session setup (relay TTL, mail key, first inbox scan).
         if (nodeUp && !reannouncedThisSession && SalonStore.hasIdentity(this)) {
             reannouncedThisSession = true;
-            SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
-                    SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
             touchOwnRelay();   // refresh the 7-day TTL on any relay-hosted content
             ensureMailKey();
             ensureInboxAndScan();
         }
+        // Gossip mesh: re-post any FADED pointer (own + a few others) so the square stays
+        // alive. Must run REPEATEDLY (on every connect + on a foreground timer), not once —
+        // a beacon prunes ~a day, so an app open once and left running has to keep renewing
+        // it. keepAlive no-ops unless something has actually faded (on-chain check).
+        if (nodeUp && SalonStore.hasIdentity(this)) reannounceNow();
         // The first render() runs at onCreate before the node connects; node-gated
         // content (the holdings showcase, the tip/message bar) was drawn in its
         // "no node" state. Re-render once, on the false->true transition, so it refreshes.
@@ -620,9 +621,41 @@ public class MainActivity extends AppCompatActivity {
     };
     private void startPairingRetry() { pairHandler.removeCallbacks(pairTick); pairHandler.postDelayed(pairTick, 3000); }
 
+    // Foreground gossip-mesh renewal: re-run keepAlive on every connect/resume AND on a
+    // timer while the app is open, so a beacon that prunes (~a day) is renewed before it
+    // goes dark. keepAlive itself only POSTS when a beacon has actually faded (on-chain
+    // check), so this is cheap. Throttled so a burst of connects doesn't re-scan repeatedly.
+    private final android.os.Handler reannHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private long lastReannounceMs = 0;
+    private static final long REANN_THROTTLE_MS = 4 * 60 * 1000L;    // don't re-scan more than ~every 4 min
+    private static final long REANN_INTERVAL_MS = 20 * 60 * 1000L;   // check every ~20 min while foreground
+    private final Runnable reannTick = new Runnable() {
+        @Override public void run() { reannounceNow(); reannHandler.postDelayed(this, REANN_INTERVAL_MS); }
+    };
+    private void reannounceNow() {
+        if (!nodeUp || !SalonStore.hasIdentity(this)) return;
+        long now = System.currentTimeMillis();
+        if (now - lastReannounceMs < REANN_THROTTLE_MS) return;
+        lastReannounceMs = now;
+        SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
+                SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        reannHandler.removeCallbacks(reannTick);
+        reannHandler.post(reannTick);   // renew now (if faded) + reschedule while foreground
+    }
+
+    @Override protected void onPause() {
+        super.onPause();
+        reannHandler.removeCallbacks(reannTick);   // no background beaconing — foreground only
+    }
+
     @Override protected void onDestroy() {
         super.onDestroy();
         pairHandler.removeCallbacks(pairTick);
+        reannHandler.removeCallbacks(reannTick);
         io.shutdownNow();
         stopAudio();
         if (node != null) node.onDestroy();   // release the MinimaAPI receiver + cancel pending IPC timeouts
@@ -820,9 +853,18 @@ public class MainActivity extends AppCompatActivity {
         body.addView(status, lp(0, 0, 0, 8));
         if (!nodeUp) { status.setText("Waiting for Minima Core."); return; }
         final int ep = renderEpoch;
-        SalonRegistry.list(node, entries -> runOnUiThread(() -> {
+        SalonRegistry.list(node, rawEntries -> runOnUiThread(() -> {
             if (ep != renderEpoch) return;   // user navigated away before the square loaded
             body.removeView(status);
+            java.util.List<SalonRegistry.Entry> entries = new java.util.ArrayList<>(rawEntries);
+            // Always show yourself first — your beacon may still be confirming after a re-announce,
+            // so the square never looks empty to you while your identity exists locally.
+            String myTid = SalonStore.get(this, "tokenid");
+            if (!myTid.isEmpty()) {
+                boolean present = false;
+                for (SalonRegistry.Entry e : entries) if (myTid.equals(e.tokenid)) { present = true; break; }
+                if (!present) entries.add(0, new SalonRegistry.Entry(myTid, SalonStore.get(this, "profileUrl"), SalonStore.get(this, "handle")));
+            }
             if (entries.isEmpty()) { body.addView(Design.note(this, "The square is empty — be the first. Publish your Salon from My Salon."), lp(0, 0, 0, 12)); return; }
             for (SalonRegistry.Entry e : entries) {
                 LinearLayout c = card(); c.setClickable(true); Design.pressable(c);

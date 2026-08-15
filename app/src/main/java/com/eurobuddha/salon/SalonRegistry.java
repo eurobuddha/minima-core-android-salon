@@ -101,8 +101,8 @@ final class SalonRegistry {
 
                 List<Entry> mine = new ArrayList<>(), fol = new ArrayList<>(), others = new ArrayList<>();
                 for (Entry e : byId.values()) {
-                    if (fresh.contains(e.tokenid)) continue;       // still discoverable — leave it
-                    if (ANNOUNCED.contains(e.tokenid)) continue;   // already re-posted this session
+                    if (fresh.contains(e.tokenid)) { ANNOUNCED.remove(e.tokenid); continue; }   // live again → RE-ARM so a later re-fade re-announces (else the beacon goes dark forever). Mirrors pandapools ReAnnouncer.
+                    if (ANNOUNCED.contains(e.tokenid)) continue;   // already re-posted, beacon not yet confirmed back into the window
                     if (e.tokenid.equals(myTokenid)) mine.add(e);
                     else if (followIds.contains(e.tokenid)) fol.add(e);
                     else others.add(e);
