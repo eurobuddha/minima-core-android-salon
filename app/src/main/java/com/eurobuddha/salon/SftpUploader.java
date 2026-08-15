@@ -36,10 +36,15 @@ final class SftpUploader implements Hosting.Uploader, AutoCloseable {
 
     private synchronized ChannelSftp channel() throws Hosting.HostingException {
         if (sftp != null && sftp.isConnected()) return sftp;
-        String host = profile.cfgStr("host");
+        String host = profile.cfgStr("host").trim();
         int port = profile.cfg().optInt("port", 22);
-        String user = profile.cfgStr("user");
+        String user = profile.cfgStr("user").trim();
         String pinnedFp = profile.cfgStr("hostKeyFp");
+        // Empty required fields are the #1 trap: the greyed placeholder ("root") LOOKS filled
+        // but isn't submitted, so an empty user makes the server reject the handshake — which
+        // would otherwise surface as a misleading "password rejected". Say what's actually wrong.
+        if (host.isEmpty()) throw new Hosting.HostingException("The Host field is empty — enter your server's address.");
+        if (user.isEmpty()) throw new Hosting.HostingException("The User field is empty — type your SFTP username (e.g. root). The greyed hint is not a value.");
         try {
             JSch jsch = new JSch();
             if ("key".equals(profile.cfgStr("auth"))) {
