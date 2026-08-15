@@ -28,6 +28,22 @@ final class NftProof {
 
     interface Gen { void ok(JSONObject item); void fail(String message); }
     interface Verify { void result(boolean verified, String reason, String stateImage); }
+    interface Held { void result(boolean held, JSONObject coin); }
+
+    /** LIVE holding check on THIS node — do we currently hold an unspent coin of {@code tokenid}?
+     *  Definitive and never stale (Axe-S3 checks live too), so it verifies the owner viewing their
+     *  own page without depending on the frozen coinexport proof, which ages out as the MMR grows. */
+    static void holds(final NodeApi node, final String tokenid, final Held cb) {
+        if (tokenid == null || tokenid.isEmpty()) { cb.result(false, null); return; }
+        node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                JSONArray a = j.optJSONArray("response");
+                JSONObject coin = (a != null && a.length() > 0) ? a.optJSONObject(0) : null;
+                cb.result(coin != null, coin);
+            }
+            @Override public void onError(String m) { cb.result(false, null); }
+        });
+    }
 
     /** bindHex = hex of the owner's Salon tokenid (identity to bind the holding to). */
     static void generate(final NodeApi node, final String tokenid, final String bindHex, final Gen cb) {
@@ -84,7 +100,12 @@ final class NftProof {
             @Override public void onResult(JSONObject c) {
                 JSONObject cr = c.optJSONObject("response");
                 JSONObject coin = cr == null ? null : cr.optJSONObject("coin");
-                if (cr == null || !cr.optBoolean("valid", false) || coin == null || !tokenid.equalsIgnoreCase(coin.optString("tokenid"))) { cb.result(false, "coin spent, not found, or wrong token", ""); return; }
+                if (cr == null || coin == null) { cb.result(false, "coin not found on-chain", ""); return; }
+                if (!tokenid.equalsIgnoreCase(coin.optString("tokenid"))) { cb.result(false, "wrong token", ""); return; }
+                if (coin.optBoolean("spent", false)) { cb.result(false, "coin has been spent", ""); return; }
+                // valid=false with an UNSPENT coin means the exported MMR proof aged out, NOT that
+                // the coin is gone — say so honestly (the owner's live check below covers their own view).
+                if (!cr.optBoolean("valid", false)) { cb.result(false, "proof out of date — re-publish to refresh it", ""); return; }
                 final String coinAddr = coin.optString("address", "");
                 // the sealed StateNFT edition art rides in the proof's coin state (port 1)
                 final String stateImg = stateImageUri(coin);

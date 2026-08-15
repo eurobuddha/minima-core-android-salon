@@ -1158,13 +1158,46 @@ public class MainActivity extends AppCompatActivity {
 
     /** Verify a showcase holding on THIS device's node; write the outcome (with the
      *  failing-stage reason) into {@code tv}. Green on success, vermilion on failure. */
+    private final java.util.Set<String> proofRefreshed = new java.util.HashSet<>();
+
     private void verifyInto(final JSONObject n, final String bindHex, final TextView tv) {
         if (!nodeUp) { tv.setText("connect a node to verify"); tv.setTextColor(Design.DIM()); return; }
         tv.setText("verifying on your node…"); tv.setTextColor(Design.DIM());
-        NftProof.verify(node, n, bindHex, (ok, reason, stateImg) -> runOnUiThread(() -> {
-            tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
-            tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
+        final String tid = n.optString("tokenid");
+        // 1) LIVE check first (Axe-S3 style): if THIS node holds an unspent coin of the token,
+        //    it's verified now — this is you viewing your own page, and it never goes stale like
+        //    the frozen coinexport proof (which reports valid=false once the MMR has grown).
+        NftProof.holds(node, tid, (held, coin) -> runOnUiThread(() -> {
+            if (held) {
+                tv.setText("✓ VERIFIED HOLDING"); tv.setTextColor(0xFF1F7A3F);
+                maybeRefreshProof(n, bindHex);   // regenerate the stored proof so the PUBLISHED one stops aging out
+                return;
+            }
+            // 2) Not held here → a stranger's view: fall back to the trustless frozen proof.
+            NftProof.verify(node, n, bindHex, (ok, reason, stateImg) -> runOnUiThread(() -> {
+                tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
+                tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
+            }));
         }));
+    }
+
+    /** Owner still holds the coin → regenerate the coinexport proof (once per session per token)
+     *  and update the stored showcase item, so the next Publish carries a FRESH proof that
+     *  strangers' nodes can verify. Silent; the live check already showed the green tick. */
+    private void maybeRefreshProof(final JSONObject n, final String bindHex) {
+        final String tid = n.optString("tokenid");
+        if (tid.isEmpty() || bindHex == null || bindHex.isEmpty() || !proofRefreshed.add(tid)) return;
+        NftProof.generate(node, tid, bindHex, new NftProof.Gen() {
+            @Override public void ok(JSONObject item) {
+                try { item.put("name", n.optString("name")); item.put("image", n.optString("image")); } catch (Exception ignored) {}
+                JSONArray arr = SalonStore.arr(MainActivity.this, "nfts");
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.optJSONObject(i);
+                    if (o != null && tid.equalsIgnoreCase(o.optString("tokenid"))) { try { arr.put(i, item); } catch (Exception ignored) {} SalonStore.setArr(MainActivity.this, "nfts", arr); break; }
+                }
+            }
+            @Override public void fail(String message) {}
+        });
     }
 
     /** The StateNFT's per-edition state-variable images THIS node holds, as a 2-up gallery —
