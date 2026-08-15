@@ -26,6 +26,11 @@ final class RelayResolver {
 
     static boolean isRelayRef(String s) { return s != null && s.startsWith(PREFIX); }
 
+    /** Any resolvable media ref: the legacy MaxLite relay OR the Maxima mesh. */
+    static boolean isMediaRef(String s) {
+        return isRelayRef(s) || MaximaLink.isMediaRef(s);
+    }
+
     static final class Media { final byte[] bytes; final String mime; Media(byte[] b, String m) { bytes = b; mime = m; } }
 
     private static JSONObject manifest(String ref) throws Exception {
@@ -33,8 +38,17 @@ final class RelayResolver {
         return new JSONObject(new String(json, StandardCharsets.UTF_8));
     }
 
-    /** Fetch + decrypt a ref to bytes + mime. */
+    /** Fetch + decrypt a ref to bytes + mime. Handles both schemes. */
     static Media resolveBytes(String ref) throws Exception {
+        // Maxima mesh: the transport does the fetch/verify/decrypt; we just read
+        // the mime out of the (base64url) manifest for display.
+        if (MaximaLink.isMediaRef(ref)) {
+            String json = new String(Base64.decode(
+                    ref.substring(MaximaLink.MEDIA_PREFIX.length()),
+                    Base64.NO_WRAP | Base64.URL_SAFE), StandardCharsets.UTF_8);
+            String mime = new JSONObject(json).optString("mime", "application/octet-stream");
+            return new Media(MaximaLink.getMedia(ref), mime);
+        }
         JSONObject m = manifest(ref);
         String base = m.getString("relay");
         byte[] key = Hex.from(m.getString("key"));

@@ -55,7 +55,7 @@ public final class ImageLoader {
 
     static Bitmap decode(android.content.Context ctx, String url, int reqPx) {
         try {
-            byte[] bytes = RelayResolver.isRelayRef(url) ? relayBytes(url)
+            byte[] bytes = RelayResolver.isMediaRef(url) ? relayBytes(url)
                     : url.startsWith("data:") ? dataUriBytes(url)
                     : fetchCached(ctx, url);
             if (bytes == null || bytes.length == 0) return null;

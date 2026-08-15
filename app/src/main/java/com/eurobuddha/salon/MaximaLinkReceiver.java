@@ -54,6 +54,25 @@ public class MaximaLinkReceiver extends BroadcastReceiver {
         String error = i.getStringExtra(MaximaLink.X_ERROR);
         String result = i.getStringExtra(MaximaLink.X_RESULT);
 
+        // A pending blocking media call (put/get)?
+        if (reqId != null && (reqId.startsWith("mput-") || reqId.startsWith("mget-"))) {
+            MaximaLink.MediaWaiter w = MaximaLink.PENDING_MEDIA.get(reqId);
+            if (w != null) {
+                if (error != null) {
+                    w.error = error;
+                } else if (reqId.startsWith("mput-")) {
+                    w.resultText = result;   // the manifest JSON
+                } else {
+                    w.uri = i.getParcelableExtra(MaximaLink.X_DATA_URI);
+                    if (w.uri == null) {
+                        w.error = "no media returned";
+                    }
+                }
+                w.latch.countDown();
+            }
+            return;
+        }
+
         // A pending DM send?
         if (reqId != null && reqId.startsWith("dm-")) {
             MaximaLink.SendCb cb = MaximaLink.PENDING_SENDS.remove(reqId);

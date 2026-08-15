@@ -74,6 +74,21 @@ final class MaximaLink {
     /** In-flight request callbacks, keyed by requestid. */
     static final Map<String, SendCb> PENDING_SENDS = new ConcurrentHashMap<>();
 
+    /** In-flight blocking media calls, keyed by requestid. */
+    static final Map<String, MediaWaiter> PENDING_MEDIA = new ConcurrentHashMap<>();
+
+    static final class MediaWaiter {
+        final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+        volatile String resultText;   // put: the manifest JSON
+        volatile android.net.Uri uri; // get: bytes handed back as content://
+        volatile String error;
+    }
+
+    /** Application context, cached on connect() so the static media helpers -
+     *  called from background threads without a Context - can broadcast. */
+    private static volatile Context sApp;
+
     private MaximaLink() {
     }
 
@@ -88,6 +103,7 @@ final class MaximaLink {
      * previous one's RESPONSE lands in {@link MaximaLinkReceiver}.
      */
     static void connect(Context ctx) {
+        sApp = ctx.getApplicationContext();
         if (!isInstalled(ctx)) {
             return;
         }
@@ -183,6 +199,117 @@ final class MaximaLink {
             // ride inside the sealed JSON, so the blob stays small either way.)
             i.putExtra(X_DATA, sealedHex.startsWith("0x") ? sealedHex : "0x" + sealedHex);
         });
+    }
+
+    // ---------------------------------------------------------------
+    // self-hosted media (blocking; call from a background thread)
+    // ---------------------------------------------------------------
+
+    static final String MEDIA_PREFIX = "mx1:";
+    static final String ACTION_MEDIA = MAXIMA_PKG + ".MEDIA";
+    static final String X_OP = "op";
+    static final String X_DATA_LEN = "datalen";
+
+    static boolean isMediaRef(String s) {
+        return s != null && s.startsWith(MEDIA_PREFIX);
+    }
+
+    /**
+     * Publish bytes through Maxima's self-hosted media layer; returns an
+     * {@code mx1:<base64url manifest>} ref. Blocks on the IPC round trip.
+     */
+    static String putMedia(byte[] zBytes, String zMime) throws Exception {
+        Context ctx = requireApp();
+        // Hand the bytes to Maxima as a content:// grant (they can exceed the
+        // broadcast parcel limit).
+        android.net.Uri uri = stageForMaxima(ctx, zBytes);
+        String reqId = "mput-" + System.currentTimeMillis() + "-" + zBytes.length;
+        MediaWaiter w = new MediaWaiter();
+        PENDING_MEDIA.put(reqId, w);
+        Intent i = new Intent(ACTION_MEDIA);
+        i.setPackage(MAXIMA_PKG);
+        i.putExtra(X_PACKAGE, ctx.getPackageName());
+        i.putExtra(X_CLASS, RECEIVER);
+        i.putExtra(X_REQID, reqId);
+        i.putExtra(X_OP, "put");
+        i.setDataAndType(uri, zMime == null ? "application/octet-stream" : zMime);
+        i.putExtra(X_DATA_URI, uri);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        ctx.grantUriPermission(MAXIMA_PKG, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        ctx.sendBroadcast(i);
+
+        if (!w.latch.await(90, java.util.concurrent.TimeUnit.SECONDS)) {
+            PENDING_MEDIA.remove(reqId);
+            throw new Exception("maxima media put timeout");
+        }
+        PENDING_MEDIA.remove(reqId);
+        if (w.error != null || w.resultText == null) {
+            throw new Exception("maxima media put: " + w.error);
+        }
+        return MEDIA_PREFIX + android.util.Base64.encodeToString(
+                w.resultText.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE);
+    }
+
+    /** Fetch + reassemble an {@code mx1:} ref to bytes. Blocks on the IPC round trip. */
+    static byte[] getMedia(String zRef) throws Exception {
+        Context ctx = requireApp();
+        String manifestJson = new String(android.util.Base64.decode(
+                zRef.substring(MEDIA_PREFIX.length()),
+                android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE),
+                java.nio.charset.StandardCharsets.UTF_8);
+        String reqId = "mget-" + System.currentTimeMillis();
+        MediaWaiter w = new MediaWaiter();
+        PENDING_MEDIA.put(reqId, w);
+        Intent i = new Intent(ACTION_MEDIA);
+        i.setPackage(MAXIMA_PKG);
+        i.putExtra(X_PACKAGE, ctx.getPackageName());
+        i.putExtra(X_CLASS, RECEIVER);
+        i.putExtra(X_REQID, reqId);
+        i.putExtra(X_OP, "get");
+        i.putExtra(X_DATA, manifestJson);
+        ctx.sendBroadcast(i);
+
+        if (!w.latch.await(90, java.util.concurrent.TimeUnit.SECONDS)) {
+            PENDING_MEDIA.remove(reqId);
+            throw new Exception("maxima media get timeout");
+        }
+        PENDING_MEDIA.remove(reqId);
+        if (w.error != null || w.uri == null) {
+            throw new Exception("maxima media get: " + w.error);
+        }
+        try (java.io.InputStream in = ctx.getContentResolver().openInputStream(w.uri)) {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            return bos.toByteArray();
+        }
+    }
+
+    private static android.net.Uri stageForMaxima(Context ctx, byte[] bytes) throws Exception {
+        java.io.File dir = new java.io.File(ctx.getCacheDir(), "shared");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        java.io.File f = new java.io.File(dir, "mxmedia-" + System.nanoTime() + ".bin");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
+            out.write(bytes);
+        }
+        return androidx.core.content.FileProvider.getUriForFile(
+                ctx, ctx.getPackageName() + ".files", f);
+    }
+
+    private static Context requireApp() throws Exception {
+        Context c = sApp;
+        if (c == null) {
+            throw new Exception("Maxima link not initialised");
+        }
+        if (!isReady(c)) {
+            throw new Exception("Maxima not ready");
+        }
+        return c;
     }
 
     // ---------------------------------------------------------------

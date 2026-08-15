@@ -1471,12 +1471,16 @@ public class MainActivity extends AppCompatActivity {
             });
             return;
         }
-        if (r == PICK_DM_IMG) {   // DM photo: encrypt to the relay blob store, send the ref
+        if (r == PICK_DM_IMG) {   // DM photo: self-host via Maxima when ready, else the encrypted relay
             toast("Sending photo…");
             io.execute(() -> {
                 try {
                     byte[] jpeg = readScaledJpeg(uri, 1400);
-                    String ref = new RelayUploader(Hosting.Profile.fresh(Hosting.TYPE_RELAY)).putFile(jpeg, "dm.jpg", "image/jpeg");
+                    // Prefer the Maxima mesh (you host it, no central relay);
+                    // fall back to the encrypted relay when Maxima isn't ready.
+                    String type = MaximaLink.isReady(this) ? Hosting.TYPE_MAXIMA : Hosting.TYPE_RELAY;
+                    String ref = Hosting.forProfile(Hosting.Profile.fresh(type))
+                            .putFile(jpeg, "dm.jpg", "image/jpeg");
                     runOnUiThread(() -> sendDm("", ref, "image/jpeg"));
                 } catch (Exception e) { runOnUiThread(() -> toast("Photo failed: " + e.getMessage())); }
             });
@@ -1575,7 +1579,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void openVideo(String url) {
         if (url == null || url.isEmpty()) return;
-        if (RelayResolver.isRelayRef(url)) {                 // decrypt to a cache file first
+        if (RelayResolver.isMediaRef(url)) {                 // decrypt to a cache file first
             toast("Decrypting video…");
             io.execute(() -> { try { java.io.File f = RelayResolver.resolveToTempFile(this, url);
                 runOnUiThread(() -> playVideoUri(Uri.fromFile(f))); }
@@ -1767,7 +1771,7 @@ public class MainActivity extends AppCompatActivity {
      *  controlled from the docked mini-player until you hit ✕. */
     private void playTrack(String url, String title) {
         if (url == null || url.isEmpty()) return;
-        if (RelayResolver.isRelayRef(url)) {                 // decrypt to a cache file first
+        if (RelayResolver.isMediaRef(url)) {                 // decrypt to a cache file first
             stopAudio(); miniTitle.setText(title); miniTime.setText("decrypting…"); miniBar.setProgress(0);
             miniPlayer.setVisibility(View.VISIBLE);
             io.execute(() -> { try { java.io.File f = RelayResolver.resolveToTempFile(this, url);
@@ -2088,8 +2092,8 @@ public class MainActivity extends AppCompatActivity {
         body.addView(btn("Add destination", true, () -> { hostEdit = null; go(Screen.HOSTING_EDIT); }), lph(52, 0, 4, 0, 8));
     }
 
-    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_RELAY };
-    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Encrypted relay" };
+    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_RELAY, Hosting.TYPE_MAXIMA };
+    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Encrypted relay", "Maxima mesh" };
 
     private void renderHostingEdit() {
         masthead(hostEdit == null ? "Add destination" : "Edit destination");
@@ -2139,6 +2143,10 @@ public class MainActivity extends AppCompatActivity {
             case Hosting.TYPE_RELAY:
                 cfgField(card, cfg, "relayUrl", "Relay URL", RelayUploader.DEFAULT_RELAY, false);
                 card.addView(Design.note(this, "Publish with NO server of your own: your phone encrypts your page + media (libsodium) and uploads only the CIPHERTEXT to this relay's blob store — the relay can never read it. The decryption key travels in your public pointer, so any Salon viewer can see your page.\n\nTrade-offs: viewable in the Salon app only (a web browser can't decrypt it — SFTP/IPFS keep the browser view); and content expires ~7 days after it's last opened/viewed, so open the app now and then to keep it alive."), lp(0, 6, 0, 2));
+                break;
+            case Hosting.TYPE_MAXIMA:
+                card.addView(Design.note(this, "You are the server. Media is encrypted on your phone, kept HERE, and mirrored across the Maxima relay mesh so it stays reachable while your phone sleeps — no single relay to trust, pay or lose. Needs the Maxima app installed (approve Salon once in Maxima → Connected apps).\n\nViewable in Maxima-capable apps only. This is the decentralised path: 100% of the network is hosted by its users."
+                        + (MaximaLink.isReady(this) ? "\n\n✓ Maxima connected." : "\n\n⚠ Maxima not connected yet — install/approve it, then reopen this.")), lp(0, 6, 0, 2));
                 break;
         }
         final TextView status = Design.note(this, ""); card.addView(status, lp(0, 8, 0, 0));

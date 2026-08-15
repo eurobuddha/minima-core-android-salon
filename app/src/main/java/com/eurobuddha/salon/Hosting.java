@@ -28,6 +28,7 @@ final class Hosting {
     static final String TYPE_PINATA = "pinata";
     static final String TYPE_GITHUB = "github";
     static final String TYPE_RELAY = "relay";
+    static final String TYPE_MAXIMA = "maxima";   // self-hosted mesh (you are the server)
 
     static class Profile {
         JSONObject j;
@@ -208,6 +209,7 @@ final class Hosting {
             case TYPE_PINATA: return new PinataUploader(p);
             case TYPE_GITHUB: return new GithubUploader(p);
             case TYPE_RELAY:  return new RelayUploader(p);
+            case TYPE_MAXIMA: return new MaximaHostUploader(p);
             default: throw new HostingException("Unknown destination type: " + p.type());
         }
     }
@@ -244,8 +246,8 @@ final class Hosting {
      *  hosts the user explicitly configured in the profile (a LAN kubo
      *  gateway is legitimate for its owner). */
     static void verifyUrl(String url, Profile p) throws HostingException {
-        // A relay1: ref isn't an http URL — verify by fetching+decrypting it back.
-        if (RelayResolver.isRelayRef(url)) {
+        // A relay1:/mx1: ref isn.t an http URL — verify by fetching+decrypting it back.
+        if (RelayResolver.isMediaRef(url)) {
             try { RelayResolver.resolveBytes(url); return; }
             catch (Exception e) { throw new HostingException("relay content not readable back: " + e.getMessage()); }
         }
