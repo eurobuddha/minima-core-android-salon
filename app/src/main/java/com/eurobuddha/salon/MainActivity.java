@@ -2205,7 +2205,11 @@ public class MainActivity extends AppCompatActivity {
     /* ================= HTTP ================= */
 
     private JSONObject httpGetJson(String url) {
-        if (RelayResolver.isRelayRef(url)) {
+        // A profile pointer can be relay1: (encrypted relay) OR mx1: (Maxima mesh)
+        // OR a plain http(s) URL. isMediaRef covers BOTH ref schemes; without the
+        // mx1: case a mesh-hosted profile fell through to the http branch, failed
+        // the startsWith("http") test, returned null and showed "host offline".
+        if (RelayResolver.isMediaRef(url)) {
             try { return RelayResolver.resolveJson(url); } catch (Exception e) { return null; }
         }
         HttpURLConnection c = null;
