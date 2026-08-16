@@ -40,7 +40,7 @@ public final class Design {
     public static int PAPER()  { return 0xFFF2F1EC; }   // ground
     public static int CARD()   { return 0xFFFCFBF7; }   // raised surface
     public static int INK()    { return 0xFF111111; }   // text + rules
-    public static int DIM()    { return 0xFF6B6A64; }   // secondary text
+    public static int DIM()    { return 0xFF4F4E49; }   // secondary text — ~7.3:1 on PAPER (was 6B6A64, too close to the greys at 12sp)
     public static int SOFT()   { return 0xFFDEDDD6; }   // tracks, idle rules
     public static int ACCENT() { return 0xFFE63312; }   // vermilion stamp
     public static int PLATE1() { return 0xFFF5D547; }   // yellow plate
