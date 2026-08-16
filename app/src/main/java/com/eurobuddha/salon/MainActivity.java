@@ -74,6 +74,7 @@ public class MainActivity extends AppCompatActivity {
 
     private LinearLayout appbar, navRow, body;
     private int mLastKb = 0;   // last real keyboard height, latched through spurious 0-insets
+    private static final String XPORT_PREF = "xport_";   // per-contact transport override
     private ScrollView scroll;
     private androidx.swiperefreshlayout.widget.SwipeRefreshLayout swipe;
     private FrameLayout rootFrame;
@@ -461,12 +462,17 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout bar = row();
         bar.addView(btn("← Messages", false, () -> go(Screen.MESSAGES)), weight(46, 0, 0));
         body.addView(bar, lp(0, 0, 0, 8));
-        // Which transport carries messages to THIS contact: Maxima (off-chain,
-        // instant) when they publish an mxaddr and ours is up, else the chain.
-        boolean mxThread = ct != null && ct.mxaddr != null && !ct.mxaddr.isEmpty() && MaximaLink.isReady(this);
+        // Which transport carries messages to THIS contact — tap to override.
+        String xport = SalonStore.get(this, XPORT_PREF + threadPeer);
+        boolean hasMxAddr = ct != null && ct.mxaddr != null && !ct.mxaddr.isEmpty();
+        boolean usingMaxima = !"chain".equals(xport) && hasMxAddr && MaximaLink.isReady(this);
+        String forced = "maxima".equals(xport) || "chain".equals(xport) ? " · forced" : "";
+        TextView chip = Design.pill(this,
+                (usingMaxima ? "⚡ Maxima · off-chain" : "⛓ Minima · on-chain") + forced + "  ▾",
+                usingMaxima ? Design.PILL_MINE : Design.PILL_DIM);
+        chip.setOnClickListener(v -> transportDialog());
         LinearLayout tr = row();
-        tr.addView(Design.pill(this, mxThread ? "⚡ Maxima · off-chain, instant" : "⛓ Minima · on-chain",
-                mxThread ? Design.PILL_MINE : Design.PILL_DIM), new LinearLayout.LayoutParams(-2, -2));
+        tr.addView(chip, new LinearLayout.LayoutParams(-2, -2));
         body.addView(tr, lp(0, 0, 0, 8));
         List<MailDb.Message> msgs = db.messages(threadPeer);
         if (msgs.isEmpty()) body.addView(Design.note(this, "No messages yet — say hi. Everything here is end-to-end encrypted and sent over the chain."), lp(0, 0, 0, 10));
@@ -511,6 +517,10 @@ public class MainActivity extends AppCompatActivity {
         String myHandle = "@" + SalonStore.get(this, "handle");
         String myAddr = SalonStore.get(this, "tipaddr");
         JSONObject msg = MinimaMail.compose(myHandle, myAddr, body, mediaRef, mediaMime, ts);
+        // Stamp MY Maxima address into every DM (both pipes carry it). Receiving
+        // one teaches the other side how to reply over Maxima — this is what makes
+        // the transport truly two-way instead of one-directionally learned.
+        try { String myMx = MaximaLink.myAddresses(this); if (!myMx.isEmpty()) msg.put("mxaddr", myMx); } catch (Exception ignored) {}
         db.insert("me-" + System.currentTimeMillis() + "-" + Math.abs(body.hashCode()), threadPeer, true, body, mediaRef, mediaMime, ts, true);
         db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
         render();
@@ -521,7 +531,17 @@ public class MainActivity extends AppCompatActivity {
         // confirm is HELD (the relays mailbox it; the two-tick receipt is the
         // real delivery signal), not put on the public ledger. The same sealed
         // blob rides either pipe, so sender verification is identical.
+        // Per-contact override (tap the transport chip in the thread header):
+        //   auto (default) → Maxima when we know their address, else chain
+        //   maxima         → force Maxima (needs their address)
+        //   chain          → force on-chain
+        String xport = SalonStore.get(this, XPORT_PREF + threadPeer);
         boolean hasMx = ct.mxaddr != null && !ct.mxaddr.isEmpty();
+        if ("chain".equals(xport)) { coinSendDm(ct, msg); return; }
+        if ("maxima".equals(xport) && !hasMx) {
+            toast("No Maxima address for this contact yet — they teach it to you when they message you, or open their profile.");
+            return;
+        }
         if (hasMx) {
             if (!MaximaLink.isReady(this)) {
                 // Peer is Maxima-only and our transport isn't up. Don't fall to
@@ -553,6 +573,31 @@ public class MainActivity extends AppCompatActivity {
         // No mxaddr: the peer isn't on Maxima, so the chain is the only way
         // to reach them.
         coinSendDm(ct, msg);
+    }
+
+    /** Let the user force the transport for THIS contact, or leave it automatic. */
+    private void transportDialog() {
+        final MailDb.Contact ct = MailDb.get(this).contact(threadPeer);
+        boolean hasMx = ct != null && ct.mxaddr != null && !ct.mxaddr.isEmpty();
+        final String[] labels = {
+                "Automatic — Maxima when possible, else on-chain",
+                "Prefer Maxima — off-chain, instant" + (hasMx ? "" : "  (no address yet)"),
+                "On-chain only — Minima dust coin"
+        };
+        final String[] vals = {"auto", "maxima", "chain"};
+        String cur = SalonStore.get(this, XPORT_PREF + threadPeer);
+        int sel = "maxima".equals(cur) ? 1 : "chain".equals(cur) ? 2 : 0;
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Message transport")
+                .setSingleChoiceItems(labels, sel, (d, which) -> {
+                    SalonStore.put(this, XPORT_PREF + threadPeer, vals[which]);
+                    d.dismiss();
+                    if ("maxima".equals(vals[which]) && !hasMx)
+                        toast("No Maxima address for this contact yet — it's learned when they message you, or open their profile.");
+                    render();
+                })
+                .setNegativeButton("Close", null)
+                .show();
     }
 
     /** The classic path: a 0.001 dust coin with the sealed DM in state[99]. */

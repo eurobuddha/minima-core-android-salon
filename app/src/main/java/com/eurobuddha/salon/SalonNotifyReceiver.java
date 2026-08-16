@@ -92,6 +92,12 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
             String from = m.optString("from", "someone"), body = m.optString("body", ""), media = m.optString("media", "");
             String preview = !body.isEmpty() ? body : (!media.isEmpty() ? "📎 media" : "");
             boolean isNew = MailDb.get(ctx).insert(msgId, o.fromPublicId, false, body, media, m.optString("mime", ""), m.optLong("ts", 0), o.valid);
+            // Learn the sender's Maxima address from the message itself, so our
+            // reply goes back over Maxima — the transport becomes two-way after a
+            // single message, no profile-view required. (Runs even on a duplicate,
+            // in case we learned the peer before they published an mxaddr.)
+            String peerMx = m.optString("mxaddr", "");
+            if (!peerMx.isEmpty()) MailDb.get(ctx).setMxAddr(o.fromPublicId, peerMx);
             if (isNew) {
                 MailDb.get(ctx).upsertContact(o.fromPublicId, from, "", m.optString("addr", ""), preview, m.optLong("ts", 0), true);
                 notifyStatic(ctx, "💬 @" + from.replaceFirst("^@", ""), preview);
