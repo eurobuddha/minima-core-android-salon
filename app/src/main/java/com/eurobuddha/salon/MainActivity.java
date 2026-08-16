@@ -89,6 +89,15 @@ public class MainActivity extends AppCompatActivity {
      *  dispatching the same message twice (a double coin-spend / double delivery). */
     private final java.util.Set<String> mInFlight =
             java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    /** coinid → last on-chain post attempt (ms). A `send` the node accepted keeps
+     *  mining and only TIMES OUT (at NodeApi WRITE_TIMEOUT, 180s) — the coin is still
+     *  live. Gating a chain re-post on the time since the LAST attempt (not compose)
+     *  stops the outbox double-posting a dust coin that's still in flight. */
+    private final java.util.Map<String, Long> mLastChainAttempt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** One tip in flight at a time. Tips move REAL value and have no node-side
+     *  idempotency, so guard the whole check-balance→send round-trip. */
+    private volatile boolean mTipInFlight = false;
     private ScrollView scroll;
     private androidx.swiperefreshlayout.widget.SwipeRefreshLayout swipe;
     private FrameLayout rootFrame;
@@ -413,6 +422,8 @@ public class MainActivity extends AppCompatActivity {
         final java.math.BigDecimal amt;
         try { amt = new java.math.BigDecimal(amount); } catch (Exception e) { toast("Enter a valid amount."); return; }
         if (amt.signum() <= 0) { toast("Enter an amount."); return; }
+        if (mTipInFlight) { toast("A tip is already sending — one moment."); return; }
+        mTipInFlight = true;
         toast("Checking balance…");
         node.cmd("balance tokenid:" + tokenid, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
@@ -421,15 +432,15 @@ public class MainActivity extends AppCompatActivity {
                 java.math.BigDecimal haveBd; try { haveBd = new java.math.BigDecimal(sendable); } catch (Exception e) { haveBd = java.math.BigDecimal.ZERO; }
                 final java.math.BigDecimal have = haveBd;
                 runOnUiThread(() -> {
-                    if (amt.compareTo(have) > 0) { toast("Not enough " + TipTransport.label(tokenid) + " (you have " + have.toPlainString() + ")"); return; }
+                    if (amt.compareTo(have) > 0) { mTipInFlight = false; toast("Not enough " + TipTransport.label(tokenid) + " (you have " + have.toPlainString() + ")"); return; }
                     toast("Sending tip…");
                     TipTransport.tip(node, toAddr, amount, tokenid, "@" + SalonStore.get(MainActivity.this, "handle"), note, new TipTransport.Cb() {
-                        @Override public void onSent(String txpowid) { runOnUiThread(() -> toast("Tip sent to @" + handle + " — mining ⛏")); }
-                        @Override public void onFailed(String msg) { runOnUiThread(() -> toast("Tip failed: " + msg)); }
+                        @Override public void onSent(String txpowid) { runOnUiThread(() -> { mTipInFlight = false; toast("Tip sent to @" + handle + " — mining ⛏"); }); }
+                        @Override public void onFailed(String msg) { runOnUiThread(() -> { mTipInFlight = false; toast("Tip failed: " + msg); }); }
                     });
                 });
             }
-            @Override public void onError(String m) { runOnUiThread(() -> toast("Balance check failed: " + m)); }
+            @Override public void onError(String m) { runOnUiThread(() -> { mTipInFlight = false; toast("Balance check failed: " + m); }); }
         });
     }
 
@@ -708,11 +719,12 @@ public class MainActivity extends AppCompatActivity {
             if (!forceChain && hasMx && MaximaLink.isReady(this)) {
                 // Idempotent: the peer dedups by the stable id, so retry any time.
                 sendOverMaxima(ct.peerpk, ct.mxaddr, msg, m.coinid);
-            } else if ((forceChain || !hasMx) && nodeUp && ct.addr != null && !ct.addr.isEmpty()
-                    && System.currentTimeMillis() / 1000 - m.ts > 120) {
-                // Chain retry only after the post-ack window, so we never double-post
-                // an in-flight coin. A genuinely-failed post created no coin.
-                coinSendDm(ct, msg, m.coinid);
+            } else if ((forceChain || !hasMx) && nodeUp && ct.addr != null && !ct.addr.isEmpty()) {
+                // Re-post on-chain only after waiting out the node write timeout (180s)
+                // since the LAST attempt — a send that timed out may still be mining a
+                // live coin, and re-posting inside that window double-spends the dust.
+                long lastMs = mLastChainAttempt.getOrDefault(m.coinid, m.ts * 1000L);
+                if (System.currentTimeMillis() - lastMs > 240_000L) coinSendDm(ct, msg, m.coinid);
             }
             // else: no transport ready yet (or too fresh to safely re-post) — stays PENDING.
         }
@@ -747,6 +759,7 @@ public class MainActivity extends AppCompatActivity {
     /** The classic path: a 0.001 dust coin with the sealed DM in state[99]. */
     private void coinSendDm(final MailDb.Contact ct, JSONObject msg, final String msgId) {
         if (!mInFlight.add(msgId)) return;   // already being posted by another trigger
+        mLastChainAttempt.put(msgId, System.currentTimeMillis());   // start the re-post cooldown
         MinimaMail.send(node, SalonComms.crypto(this), ct.addr, ct.peerpk, msg, new MinimaMail.Cb() {
             @Override public void onSent(String txpowid) {
                 MailDb.get(MainActivity.this).setStatus(msgId, MailDb.SENT);
@@ -1663,17 +1676,33 @@ public class MainActivity extends AppCompatActivity {
         // 1) LIVE check first (Axe-S3 style): if THIS node holds an unspent coin of the token,
         //    it's verified now — this is you viewing your own page, and it never goes stale like
         //    the frozen coinexport proof (which reports valid=false once the MMR has grown).
-        NftProof.holds(node, tid, (held, coin) -> runOnUiThread(() -> {
-            if (held) {
-                tv.setText("✓ VERIFIED HOLDING"); tv.setTextColor(0xFF1F7A3F);
-                maybeRefreshProof(n, bindHex);   // regenerate the stored proof so the PUBLISHED one stops aging out
-                return;
-            }
-            // 2) Not held here → a stranger's view: fall back to the trustless frozen proof.
-            NftProof.verify(node, n, bindHex, (ok, reason, stateImg) -> runOnUiThread(() -> {
-                tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
-                tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
+        //    The "do I hold it?" fast-path is ONLY sound on YOUR OWN page: if you hold
+        //    the token you ARE the owner. On a STRANGER's page it would paint YOUR
+        //    holding as THEIRS (any shared/fungible/multi-holder token you also hold)
+        //    and skip the identity binding — so strangers always go through the
+        //    trustless bound proof, which ties the coin to the profile's tokenid.
+        boolean ownPage = bindHex != null
+                && bindHex.equalsIgnoreCase(NftProof.hexOf(SalonStore.get(this, "tokenid")));
+        if (ownPage) {
+            NftProof.holds(node, tid, (held, coin) -> runOnUiThread(() -> {
+                if (held) {
+                    tv.setText("✓ VERIFIED HOLDING"); tv.setTextColor(0xFF1F7A3F);
+                    maybeRefreshProof(n, bindHex);   // regenerate the stored proof so the PUBLISHED one stops aging out
+                    return;
+                }
+                verifyBound(n, bindHex, tv);   // own page but not currently held → frozen proof
             }));
+        } else {
+            verifyBound(n, bindHex, tv);       // stranger: only the trustless identity-bound proof
+        }
+    }
+
+    /** The trustless frozen proof: the coin is bound to the profile's tokenid by a
+     *  signature, so a stranger cannot replay someone else's holding onto their page. */
+    private void verifyBound(final JSONObject n, final String bindHex, final TextView tv) {
+        NftProof.verify(node, n, bindHex, (ok, reason, stateImg) -> runOnUiThread(() -> {
+            tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
+            tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
         }));
     }
 
@@ -2603,6 +2632,7 @@ public class MainActivity extends AppCompatActivity {
     private void burnSpares() {
         if (!nodeUp) { toast("Need the node connected."); return; }
         final String keep = SalonStore.get(this, "tokenid");
+        if (keep.isEmpty()) { toast("No active identity — nothing to compare against."); return; }   // never bury everything
         node.cmd("balance", new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 final List<String> spares = new ArrayList<>();
