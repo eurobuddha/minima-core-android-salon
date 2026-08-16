@@ -105,6 +105,12 @@ public class MainActivity extends AppCompatActivity {
     private boolean nodeUp = false;
     private boolean wasNodeUp = false;      // to re-render node-gated screens on connect
     private String expandedNft = null;      // tokenid of the showcase holding currently expanded
+    // Per-tokenid caches so a re-render (expand/collapse, NEWBLOCK) does NOT re-hammer
+    // the node: each holding's verify outcome + live edition icon is resolved once per
+    // session. "Verify again" forces a fresh check. Cleared on profile switch.
+    private final java.util.Map<String, String> mVerifyText = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<String, Integer> mVerifyColor = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<String, String> mLiveIcon = new java.util.concurrent.ConcurrentHashMap<>();
     private String pubkey = "";
     private boolean adoptChecked = false;
     private boolean reannouncedThisSession = false;
@@ -1585,10 +1591,16 @@ public class MainActivity extends AppCompatActivity {
      *  captured editions; reuses the working {@link #enumerateEditions} pipeline. */
     private void liveFillNftImage(final ImageView iv, final String tid, final boolean full) {
         if (!nodeUp || tid == null || tid.isEmpty()) return;
+        final String cachedUrl = mLiveIcon.get(tid);
+        if (cachedUrl != null) {   // resolved this session already — no repeat edition scan on re-render
+            if (full) ImageLoader.loadFull(this, cachedUrl, iv); else ImageLoader.loadOver(this, cachedUrl, iv);
+            return;
+        }
         enumerateEditions(tid, editions -> {
             if (editions == null || editions.isEmpty()) return;
             final String u = editions.get(0).optString("url");
             if (u.isEmpty()) return;
+            mLiveIcon.put(tid, u);
             runOnUiThread(() -> { if (full) ImageLoader.loadFull(this, u, iv); else ImageLoader.loadOver(this, u, iv); });
         });
     }
@@ -1642,7 +1654,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!n.optString("coinid").isEmpty()) copyRow(d, "Coin id", n.optString("coinid"));
                 final TextView vline = Design.text(this, "verifying on your node…", 12f, Design.DIM(), Design.mono());
                 d.addView(vline, lp(0, 8, 0, 6));
-                d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline)), lph(44, 0, 4, 0, 0));
+                d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline, true)), lph(44, 0, 4, 0, 0));
                 rows.addView(d);
                 verifyInto(n, bindHex, vline);
                 // Editions: prefer the PUBLISHED set the owner captured at prove
@@ -1670,9 +1682,21 @@ public class MainActivity extends AppCompatActivity {
     private final java.util.Set<String> proofRefreshed = new java.util.HashSet<>();
 
     private void verifyInto(final JSONObject n, final String bindHex, final TextView tv) {
+        verifyInto(n, bindHex, tv, false);
+    }
+
+    /** @param force bypass the session cache and re-run the node check ("Verify again"). */
+    private void verifyInto(final JSONObject n, final String bindHex, final TextView tv, boolean force) {
         if (!nodeUp) { tv.setText("connect a node to verify"); tv.setTextColor(Design.DIM()); return; }
-        tv.setText("verifying on your node…"); tv.setTextColor(Design.DIM());
         final String tid = n.optString("tokenid");
+        // Key by tid AND the binding profile: the same NFT on a different profile binds
+        // to a different tokenid, so its frozen proof verdict differs — never share it.
+        final String vkey = tid + "|" + (bindHex == null ? "" : bindHex);
+        if (!force && mVerifyText.containsKey(vkey)) {   // resolved this session — paint from cache, no node call
+            tv.setText(mVerifyText.get(vkey)); tv.setTextColor(mVerifyColor.get(vkey));
+            return;
+        }
+        tv.setText("verifying on your node…"); tv.setTextColor(Design.DIM());
         // 1) LIVE check first (Axe-S3 style): if THIS node holds an unspent coin of the token,
         //    it's verified now — this is you viewing your own page, and it never goes stale like
         //    the frozen coinexport proof (which reports valid=false once the MMR has grown).
@@ -1686,7 +1710,7 @@ public class MainActivity extends AppCompatActivity {
         if (ownPage) {
             NftProof.holds(node, tid, (held, coin) -> runOnUiThread(() -> {
                 if (held) {
-                    tv.setText("✓ VERIFIED HOLDING"); tv.setTextColor(0xFF1F7A3F);
+                    setVerify(vkey, tv, "✓ VERIFIED HOLDING", 0xFF1F7A3F);
                     maybeRefreshProof(n, bindHex);   // regenerate the stored proof so the PUBLISHED one stops aging out
                     return;
                 }
@@ -1697,12 +1721,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /** Paint a verify outcome into {@code tv} AND cache it under {@code vkey} (tid|bindHex)
+     *  so a re-render repaints from the cache instead of re-calling the node. */
+    private void setVerify(String vkey, TextView tv, String text, int color) {
+        mVerifyText.put(vkey, text); mVerifyColor.put(vkey, color);
+        tv.setText(text); tv.setTextColor(color);
+    }
+
     /** The trustless frozen proof: the coin is bound to the profile's tokenid by a
      *  signature, so a stranger cannot replay someone else's holding onto their page. */
     private void verifyBound(final JSONObject n, final String bindHex, final TextView tv) {
+        final String vkey = n.optString("tokenid") + "|" + (bindHex == null ? "" : bindHex);
         NftProof.verify(node, n, bindHex, (ok, reason, stateImg) -> runOnUiThread(() -> {
-            tv.setText(ok ? "✓ VERIFIED HOLDING" : "✕ " + reason);
-            tv.setTextColor(ok ? 0xFF1F7A3F : 0xFFB4462A);
+            setVerify(vkey, tv, ok ? "✓ VERIFIED HOLDING" : "✕ " + reason, ok ? 0xFF1F7A3F : 0xFFB4462A);
         }));
     }
 
