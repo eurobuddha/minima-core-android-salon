@@ -138,6 +138,9 @@ public class MainActivity extends AppCompatActivity {
         MaximaLink.connect(this);
 
         NostrKeys.init(getApplicationContext());   // Blossom uploads sign off the io executor, no Context there
+        // Warm the derived-pubkey cache off the main thread — first derivation does a
+        // Keystore decrypt + EC scalar-mult, and the Blossom editor renders it inline.
+        io.execute(() -> { try { NostrKeys.pubkeyHex(); } catch (Throwable ignored) { } });
 
         rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(Design.PAPER());

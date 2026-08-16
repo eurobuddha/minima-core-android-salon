@@ -46,9 +46,21 @@ final class BlossomUploader implements Hosting.Uploader {
             int code = con.getResponseCode();
             if (code == 409) {
                 // Content-addressed conflict = the identical blob is already there
-                // (nostr.download does this instead of a 200) — that IS success.
+                // (nostr.download does this instead of a 200). Confirm with a HEAD
+                // before trusting it; a transient HEAD failure keeps the old trust.
                 con.disconnect();
-                return endpoint + "/" + sha + extFor(mime);
+                String url = endpoint + "/" + sha + extFor(mime);
+                try {
+                    HttpURLConnection head = Hosting.open(endpoint + "/" + sha, "HEAD");
+                    int hc = head.getResponseCode();
+                    head.disconnect();
+                    if (hc >= 400) throw new Hosting.HostingException(
+                            "Blossom server answered 409 (already exists) for " + relPath
+                            + " but HEAD " + endpoint + "/" + sha + " returned HTTP " + hc + " — try another server");
+                } catch (Hosting.HostingException he) {
+                    throw he;
+                } catch (Exception ignored) { }
+                return url;
             }
             if (code == 200 || code == 201) {
                 String body = Hosting.readBody(con);
