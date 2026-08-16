@@ -2845,11 +2845,10 @@ public class MainActivity extends AppCompatActivity {
         HttpURLConnection c = null;
         try {
             if (url == null || !url.startsWith("http")) return null;
-            URL u = new URL(url);
-            if (ImageLoader.isBlockedHost(u.getHost())) return null;   // no SSRF to LAN/loopback/metadata via attacker-published profile URLs
-            c = (HttpURLConnection) u.openConnection();
-            c.setConnectTimeout(8000); c.setReadTimeout(10000); c.setRequestProperty("User-Agent", "TheSalon");
-            if (c.getResponseCode() != 200) return null;
+            // SSRF-safe: validates the host AND re-checks every redirect hop, so an
+            // attacker-published profile URL can't 302 us to the local Minima node.
+            c = ImageLoader.openChecked(url, 3);
+            if (c == null || c.getResponseCode() != 200) return null;
             InputStream in = c.getInputStream(); ByteArrayOutputStream bos = new ByteArrayOutputStream();
             byte[] buf = new byte[8192]; int n, tot = 0; while ((n = in.read(buf)) > 0 && tot < 1_000_000) { bos.write(buf, 0, n); tot += n; } in.close();
             return new JSONObject(bos.toString("UTF-8"));
@@ -2987,7 +2986,18 @@ public class MainActivity extends AppCompatActivity {
 
     private JSONArray removeAt(JSONArray a, int idx) { JSONArray out = new JSONArray(); for (int i = 0; i < a.length(); i++) if (i != idx) out.put(a.opt(i)); return out; }
 
-    private void openUrl(String url) { try { String u = url.trim(); if (!u.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) u = "http://" + u; startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u))); } catch (Exception e) { toast("Couldn't open link"); } }
+    private void openUrl(String url) {
+        try {
+            String u = url.trim();
+            if (u.matches("(?i)^https?://.*")) {                       // http/https: open
+            } else if (u.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) {     // any other scheme (file://, market://, app deep-links): refuse
+                toast("Only web (http/https) links open here."); return;
+            } else {
+                u = "http://" + u;                                    // bare domain → http
+            }
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
+        } catch (Exception e) { toast("Couldn't open link"); }
+    }
 
     /** One-tap: create + default an encrypted-relay hosting profile (no server needed). */
     private void quickStartRelay() {

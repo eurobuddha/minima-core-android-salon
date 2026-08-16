@@ -277,7 +277,7 @@ final class Hosting {
             HttpURLConnection con = (HttpURLConnection) u.openConnection();
             con.setConnectTimeout(8000);
             con.setReadTimeout(15000);
-            con.setInstanceFollowRedirects(true);
+            con.setInstanceFollowRedirects(false);   // don't follow a 3xx to an unchecked (possibly local) host; a redirect still counts as "serves"
             con.setRequestProperty("Range", "bytes=0-1");
             int code = con.getResponseCode();
             con.disconnect();
