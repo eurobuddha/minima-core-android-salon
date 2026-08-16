@@ -77,6 +77,11 @@ final class MaximaLink {
     /** In-flight blocking media calls, keyed by requestid. */
     static final Map<String, MediaWaiter> PENDING_MEDIA = new ConcurrentHashMap<>();
 
+    /** Monotonic request-id counter — makes every reqId unique even for calls in
+     *  the same millisecond (feed/profile rendering resolves media concurrently). */
+    private static final java.util.concurrent.atomic.AtomicLong SEQ =
+            new java.util.concurrent.atomic.AtomicLong();
+
     static final class MediaWaiter {
         final java.util.concurrent.CountDownLatch latch =
                 new java.util.concurrent.CountDownLatch(1);
@@ -113,11 +118,13 @@ final class MaximaLink {
 
     /** Called by the receiver as RESPONSEs arrive; advances the handshake. */
     static void onRegisterResult(Context ctx, boolean approved) {
+        boolean was = prefs(ctx).getBoolean("approved", false);
         prefs(ctx).edit().putBoolean("approved", approved).apply();
         if (approved) {
             send(ctx, ACTION_SUBSCRIBE, i -> i.putExtra(X_APPLICATION, APPLICATION));
             send(ctx, ACTION_IDENTITY, i -> {
             });
+            if (!was) MainActivity.onMaximaReady();   // transport just came up — flush the outbox
         }
     }
 
@@ -182,7 +189,7 @@ final class MaximaLink {
             cb.onFailed("no maxima address");
             return;
         }
-        String reqId = "dm-" + System.currentTimeMillis() + "-" + Math.abs(first.hashCode());
+        String reqId = "dm-" + System.currentTimeMillis() + "-" + SEQ.incrementAndGet();
         PENDING_SENDS.put(reqId, cb);
         // Sends time out client-side; if no RESPONSE lands, fail over to chain.
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
@@ -244,34 +251,40 @@ final class MaximaLink {
                     + " — host it on a server (SFTP/IPFS/GitHub) or compress it first.");
         }
         // Hand the bytes to Maxima as a content:// grant (they can exceed the
-        // broadcast parcel limit).
-        android.net.Uri uri = stageForMaxima(ctx, zBytes);
-        String reqId = "mput-" + System.currentTimeMillis() + "-" + zBytes.length;
+        // broadcast parcel limit). The staged file is deleted after the round trip.
+        java.io.File staged = stageFileForMaxima(ctx, zBytes);
+        android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                ctx, ctx.getPackageName() + ".files", staged);
+        String reqId = "mput-" + System.currentTimeMillis() + "-" + SEQ.incrementAndGet();
         MediaWaiter w = new MediaWaiter();
         PENDING_MEDIA.put(reqId, w);
-        Intent i = new Intent(ACTION_MEDIA);
-        i.setPackage(MAXIMA_PKG);
-        i.putExtra(X_PACKAGE, ctx.getPackageName());
-        i.putExtra(X_CLASS, RECEIVER);
-        i.putExtra(X_REQID, reqId);
-        i.putExtra(X_OP, "put");
-        i.setDataAndType(uri, zMime == null ? "application/octet-stream" : zMime);
-        i.putExtra(X_DATA_URI, uri);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        ctx.grantUriPermission(MAXIMA_PKG, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        ctx.sendBroadcast(i);
+        try {
+            Intent i = new Intent(ACTION_MEDIA);
+            i.setPackage(MAXIMA_PKG);
+            i.putExtra(X_PACKAGE, ctx.getPackageName());
+            i.putExtra(X_CLASS, RECEIVER);
+            i.putExtra(X_REQID, reqId);
+            i.putExtra(X_OP, "put");
+            i.setDataAndType(uri, zMime == null ? "application/octet-stream" : zMime);
+            i.putExtra(X_DATA_URI, uri);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            ctx.grantUriPermission(MAXIMA_PKG, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            ctx.sendBroadcast(i);
 
-        if (!w.latch.await(90, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (!w.latch.await(90, java.util.concurrent.TimeUnit.SECONDS)) {
+                throw new Exception("maxima media put timeout");
+            }
+            if (w.error != null || w.resultText == null) {
+                throw new Exception("maxima media put: " + w.error);
+            }
+            return MEDIA_PREFIX + android.util.Base64.encodeToString(
+                    w.resultText.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE);
+        } finally {
             PENDING_MEDIA.remove(reqId);
-            throw new Exception("maxima media put timeout");
+            //noinspection ResultOfMethodCallIgnored
+            staged.delete();   // Maxima has finished reading by the time the round trip returns
         }
-        PENDING_MEDIA.remove(reqId);
-        if (w.error != null || w.resultText == null) {
-            throw new Exception("maxima media put: " + w.error);
-        }
-        return MEDIA_PREFIX + android.util.Base64.encodeToString(
-                w.resultText.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE);
     }
 
     /** Fetch + reassemble an {@code mx1:} ref to bytes. Blocks on the IPC round trip. */
@@ -281,7 +294,7 @@ final class MaximaLink {
                 zRef.substring(MEDIA_PREFIX.length()),
                 android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE),
                 java.nio.charset.StandardCharsets.UTF_8);
-        String reqId = "mget-" + System.currentTimeMillis();
+        String reqId = "mget-" + System.currentTimeMillis() + "-" + SEQ.incrementAndGet();
         MediaWaiter w = new MediaWaiter();
         PENDING_MEDIA.put(reqId, w);
         Intent i = new Intent(ACTION_MEDIA);
@@ -312,16 +325,26 @@ final class MaximaLink {
         }
     }
 
-    private static android.net.Uri stageForMaxima(Context ctx, byte[] bytes) throws Exception {
+    private static java.io.File stageFileForMaxima(Context ctx, byte[] bytes) throws Exception {
         java.io.File dir = new java.io.File(ctx.getCacheDir(), "shared");
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
+        // Best-effort sweep of anything a crash/timeout left behind (>10 min old).
+        java.io.File[] old = dir.listFiles();
+        if (old != null) {
+            long cutoff = System.currentTimeMillis() - 10 * 60 * 1000L;
+            for (java.io.File o : old) {
+                if (o.lastModified() < cutoff) {
+                    //noinspection ResultOfMethodCallIgnored
+                    o.delete();
+                }
+            }
+        }
         java.io.File f = new java.io.File(dir, "mxmedia-" + System.nanoTime() + ".bin");
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
             out.write(bytes);
         }
-        return androidx.core.content.FileProvider.getUriForFile(
-                ctx, ctx.getPackageName() + ".files", f);
+        return f;
     }
 
     private static Context requireApp() throws Exception {

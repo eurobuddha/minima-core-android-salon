@@ -498,8 +498,11 @@ public class MainActivity extends AppCompatActivity {
             try { mm.put("type", m.mime != null && m.mime.contains("video") ? "video" : m.mime != null && m.mime.contains("audio") ? "audio" : "image"); mm.put("url", m.media); mm.put("caption", ""); } catch (Exception ignored) {}
             b.addView(mediaCard(mm), lp(0, m.body != null && !m.body.isEmpty() ? 6 : 0, 0, 0));
         }
-        String when = Util.ago(m.ts);
-        if (!when.isEmpty()) b.addView(Design.text(this, when, 9.5f, m.mine ? Design.PAPER() : Design.DIM(), Design.mono()), lp(0, 3, 0, 0));
+        // Show delivery state on my own bubbles: an unconfirmed send reads
+        // "sending…" (it's PENDING in the outbox) so nothing looks delivered
+        // when it isn't; a confirmed one shows the timestamp.
+        String meta = m.mine && m.status == MailDb.PENDING ? "sending…" : Util.ago(m.ts);
+        if (!meta.isEmpty()) b.addView(Design.text(this, meta, 9.5f, m.mine ? Design.PAPER() : Design.DIM(), Design.mono()), lp(0, 3, 0, 0));
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
         blp.setMargins(m.mine ? dp(52) : 0, 0, m.mine ? 0 : dp(52), dp(6));
         b.setLayoutParams(blp);
@@ -512,67 +515,112 @@ public class MainActivity extends AppCompatActivity {
         if (body.isEmpty() && (mediaRef == null || mediaRef.isEmpty())) { toast("Type a message."); return; }
         MailDb db = MailDb.get(this);
         final MailDb.Contact ct = db.contact(threadPeer);
-        if (ct == null || ct.addr == null || ct.addr.isEmpty()) { toast("No delivery address for this contact yet."); return; }
-        long ts = System.currentTimeMillis() / 1000;
-        String myHandle = "@" + SalonStore.get(this, "handle");
-        String myAddr = SalonStore.get(this, "tipaddr");
-        JSONObject msg = MinimaMail.compose(myHandle, myAddr, body, mediaRef, mediaMime, ts);
-        // Stamp MY Maxima address into every DM (both pipes carry it). Receiving
-        // one teaches the other side how to reply over Maxima — this is what makes
-        // the transport truly two-way instead of one-directionally learned.
-        try { String myMx = MaximaLink.myAddresses(this); if (!myMx.isEmpty()) msg.put("mxaddr", myMx); } catch (Exception ignored) {}
-        db.insert("me-" + System.currentTimeMillis() + "-" + Math.abs(body.hashCode()), threadPeer, true, body, mediaRef, mediaMime, ts, true);
-        db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
-        render();
+        if (ct == null) { toast("No contact yet."); return; }
 
-        // Maxima is the DEFAULT transport. The on-chain dust-coin path is used
-        // ONLY when the peer is not on Maxima (no mxaddr in their profile). A
-        // Maxima contact is NEVER downgraded to the chain: a send that doesn't
-        // confirm is HELD (the relays mailbox it; the two-tick receipt is the
-        // real delivery signal), not put on the public ledger. The same sealed
-        // blob rides either pipe, so sender verification is identical.
-        // Per-contact override (tap the transport chip in the thread header):
+        // Transport choice. Chain needs an on-chain address; Maxima needs an
+        // mxaddr. A Maxima-only contact (no coin addr) is fully messageable —
+        // the old guard rejected it, defeating the whole point.
         //   auto (default) → Maxima when we know their address, else chain
         //   maxima         → force Maxima (needs their address)
         //   chain          → force on-chain
         String xport = SalonStore.get(this, XPORT_PREF + threadPeer);
         boolean hasMx = ct.mxaddr != null && !ct.mxaddr.isEmpty();
-        if ("chain".equals(xport)) { coinSendDm(ct, msg); return; }
-        if ("maxima".equals(xport) && !hasMx) {
+        boolean hasAddr = ct.addr != null && !ct.addr.isEmpty();
+        boolean forceChain = "chain".equals(xport);
+        boolean forceMaxima = "maxima".equals(xport);
+        if (forceMaxima && !hasMx) {
             toast("No Maxima address for this contact yet — they teach it to you when they message you, or open their profile.");
             return;
         }
-        if (hasMx) {
-            if (!MaximaLink.isReady(this)) {
-                // Peer is Maxima-only and our transport isn't up. Don't fall to
-                // the chain - the message is saved locally as pending; it sends
-                // once Maxima is installed/approved.
-                toast("Maxima isn't connected — install/approve it to message this contact.");
-                return;
-            }
-            String sealedHex;
-            try {
-                sealedHex = SalonComms.crypto(this).seal(threadPeer,
-                        msg.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                sealedHex = null;
-            }
-            if (sealedHex == null) { toast("Couldn't seal the message."); return; }
-            MaximaLink.sendDm(this, ct.mxaddr, sealedHex, new MaximaLink.SendCb() {
-                @Override public void onSent(String status, boolean pending) {
-                    runOnUiThread(() -> toast(pending
-                            ? "Sent ✓ (held until they're online)" : "Sent ✓"));
-                }
-                @Override public void onFailed(String error) {
-                    // Maxima contact — hold and retry over Maxima, never on-chain.
-                    runOnUiThread(() -> toast("Held — will deliver over Maxima."));
-                }
-            });
+        boolean viaChain = forceChain || (!forceMaxima && !hasMx);
+        if (viaChain && !hasAddr) { toast("No delivery address for this contact yet."); return; }
+
+        long ts = System.currentTimeMillis() / 1000;
+        String myHandle = "@" + SalonStore.get(this, "handle");
+        String myAddr = SalonStore.get(this, "tipaddr");
+        JSONObject msg = MinimaMail.compose(myHandle, myAddr, body, mediaRef, mediaMime, ts);
+        // Stamp MY Maxima address into every DM so the peer learns how to reply
+        // over Maxima — makes the transport two-way after a single message.
+        try { String myMx = MaximaLink.myAddresses(this); if (!myMx.isEmpty()) msg.put("mxaddr", myMx); } catch (Exception ignored) {}
+        final String msgId = "me-" + System.currentTimeMillis() + "-" + Math.abs((body + threadPeer).hashCode());
+        // Stable app-level id so retries of the SAME message dedup on the peer
+        // (the transport msgid changes each attempt; this doesn't).
+        try { msg.put("id", msgId); } catch (Exception ignored) {}
+        // Insert PENDING: an outgoing message is only marked delivered once the
+        // transport confirms (Maxima ack / on-chain post). Until then the bubble
+        // shows "sending…" and the outbox retries it — never a silent loss.
+        db.insert(msgId, threadPeer, true, body, mediaRef, mediaMime, ts, true, MailDb.PENDING);
+        db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
+        render();
+
+        if (viaChain) { coinSendDm(ct, msg, msgId); return; }
+
+        // Maxima path (hasMx, auto or forced). Never downgraded to chain.
+        if (!MaximaLink.isReady(this)) {
+            // Left PENDING; the outbox flushes it when Maxima connects (onResume /
+            // heartbeat). Not silently dropped, not put on the public ledger.
+            toast("Maxima connecting — message queued.");
             return;
         }
-        // No mxaddr: the peer isn't on Maxima, so the chain is the only way
-        // to reach them.
-        coinSendDm(ct, msg);
+        sendOverMaxima(ct.peerpk, ct.mxaddr, msg, msgId);
+    }
+
+    /** Seal + send a composed DM over Maxima; flip the row to SENT on confirm,
+     *  leave it PENDING (for the outbox) on failure. */
+    private void sendOverMaxima(final String peerpk, String mxaddr, JSONObject msg, final String msgId) {
+        String sealedHex;
+        try {
+            sealedHex = SalonComms.crypto(this).seal(peerpk,
+                    msg.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) { sealedHex = null; }
+        if (sealedHex == null) { toast("Couldn't seal the message."); return; }   // stays PENDING; retried
+        MaximaLink.sendDm(this, mxaddr, sealedHex, new MaximaLink.SendCb() {
+            @Override public void onSent(String status, boolean pending) {
+                MailDb.get(MainActivity.this).setStatus(msgId, MailDb.SENT);
+                runOnUiThread(() -> {
+                    if (screen == Screen.THREAD) render();
+                    toast(pending ? "Sent ✓ (held until they're online)" : "Sent ✓");
+                });
+            }
+            @Override public void onFailed(String error) {
+                // Stays PENDING in the outbox; retried when Maxima reconnects.
+                runOnUiThread(() -> toast("Queued — will retry over Maxima."));
+            }
+        });
+    }
+
+    /** Re-attempt every outgoing message not yet confirmed delivered. Called when
+     *  the app comes forward and on the foreground heartbeat, so a message typed
+     *  while Maxima was down (or a send that timed out) is not lost. */
+    private void retryOutbox() {
+        java.util.List<MailDb.Message> pend = MailDb.get(this).pendingOutbox();
+        if (pend.isEmpty()) return;
+        String myHandle = "@" + SalonStore.get(this, "handle");
+        String myAddr = SalonStore.get(this, "tipaddr");
+        String myMx = MaximaLink.myAddresses(this);
+        for (MailDb.Message m : pend) {
+            MailDb.Contact ct = MailDb.get(this).contact(m.peerpk);
+            if (ct == null) continue;
+            JSONObject msg = MinimaMail.compose(myHandle, myAddr,
+                    m.body == null ? "" : m.body, m.media == null ? "" : m.media,
+                    m.mime == null ? "" : m.mime, m.ts);
+            try { if (!myMx.isEmpty()) msg.put("mxaddr", myMx); } catch (Exception ignored) {}
+            // Same stable id as the first attempt → the peer dedups the retry.
+            try { msg.put("id", m.coinid); } catch (Exception ignored) {}
+            String xport = SalonStore.get(this, XPORT_PREF + m.peerpk);
+            boolean hasMx = ct.mxaddr != null && !ct.mxaddr.isEmpty();
+            boolean forceChain = "chain".equals(xport);
+            if (!forceChain && hasMx && MaximaLink.isReady(this)) {
+                // Idempotent: the peer dedups by the stable id, so retry any time.
+                sendOverMaxima(ct.peerpk, ct.mxaddr, msg, m.coinid);
+            } else if ((forceChain || !hasMx) && nodeUp && ct.addr != null && !ct.addr.isEmpty()
+                    && System.currentTimeMillis() / 1000 - m.ts > 120) {
+                // Chain retry only after the post-ack window, so we never double-post
+                // an in-flight coin. A genuinely-failed post created no coin.
+                coinSendDm(ct, msg, m.coinid);
+            }
+            // else: no transport ready yet (or too fresh to safely re-post) — stays PENDING.
+        }
     }
 
     /** Let the user force the transport for THIS contact, or leave it automatic. */
@@ -601,10 +649,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** The classic path: a 0.001 dust coin with the sealed DM in state[99]. */
-    private void coinSendDm(MailDb.Contact ct, JSONObject msg) {
-        MinimaMail.send(node, SalonComms.crypto(this), ct.addr, threadPeer, msg, new MinimaMail.Cb() {
-            @Override public void onSent(String txpowid) { runOnUiThread(() -> toast("Sent ⛏ (mining)")); }
-            @Override public void onFailed(String m) { runOnUiThread(() -> toast("Send failed: " + m)); }
+    private void coinSendDm(final MailDb.Contact ct, JSONObject msg, final String msgId) {
+        MinimaMail.send(node, SalonComms.crypto(this), ct.addr, ct.peerpk, msg, new MinimaMail.Cb() {
+            @Override public void onSent(String txpowid) {
+                MailDb.get(MainActivity.this).setStatus(msgId, MailDb.SENT);
+                runOnUiThread(() -> { if (screen == Screen.THREAD) render(); toast("Sent ⛏ (mining)"); });
+            }
+            @Override public void onFailed(String m) {
+                // Stays PENDING in the outbox; retried when the node is ready.
+                runOnUiThread(() -> toast("Send failed — queued: " + m));
+            }
         });
     }
 
@@ -757,7 +811,7 @@ public class MainActivity extends AppCompatActivity {
     private static final long REANN_THROTTLE_MS = 4 * 60 * 1000L;    // don't re-scan more than ~every 4 min
     private static final long REANN_INTERVAL_MS = 20 * 60 * 1000L;   // check every ~20 min while foreground
     private final Runnable reannTick = new Runnable() {
-        @Override public void run() { reannounceNow(); reannHandler.postDelayed(this, REANN_INTERVAL_MS); }
+        @Override public void run() { reannounceNow(); retryOutbox(); reannHandler.postDelayed(this, REANN_INTERVAL_MS); }
     };
     private void reannounceNow() {
         if (!nodeUp || !SalonStore.hasIdentity(this)) return;
@@ -779,26 +833,42 @@ public class MainActivity extends AppCompatActivity {
         // and came back. Now any transport repaints it live.
         sInbox = () -> runOnUiThread(() -> {
             refreshUnread();
+            retryOutbox();   // an inbound message proves a transport is alive — flush
             if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
         });
+        // Also flush when Maxima finishes (re)connecting, so a message queued
+        // while it was down sends the moment it comes up.
+        sMaximaReady = () -> runOnUiThread(this::retryOutbox);
         refreshUnread();   // catch anything delivered while we were away
+        retryOutbox();     // flush anything queued while we were backgrounded / offline
         if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
     }
 
     @Override protected void onPause() {
         super.onPause();
         reannHandler.removeCallbacks(reannTick);   // no background beaconing — foreground only
-        sInbox = null;   // don't hold the activity while backgrounded
+        sInbox = null; sMaximaReady = null;   // don't hold the activity while backgrounded
     }
 
     /** Set while resumed; SalonNotifyReceiver.intakeDm pokes it after a new DM
      *  arrives over ANY transport, so the open Messages/Thread tab repaints. */
     private static volatile Runnable sInbox;
+    /** Set while resumed; MaximaLink pokes it when the transport (re)connects, so
+     *  the outbox flushes messages queued while Maxima was down. */
+    private static volatile Runnable sMaximaReady;
 
     /** Called by the shared DM intake when a NEW message lands. No-op if no
      *  activity is foreground (the notification already covers that case). */
     static void onInboxChanged() {
         Runnable r = sInbox;
+        if (r != null) {
+            try { r.run(); } catch (Exception ignored) { }
+        }
+    }
+
+    /** Called by MaximaLink when the transport becomes ready. Flushes the outbox. */
+    static void onMaximaReady() {
+        Runnable r = sMaximaReady;
         if (r != null) {
             try { r.run(); } catch (Exception ignored) { }
         }

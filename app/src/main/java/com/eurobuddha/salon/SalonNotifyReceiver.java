@@ -91,7 +91,17 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
             JSONObject m = new JSONObject(new String(o.plaintext, StandardCharsets.UTF_8));
             String from = m.optString("from", "someone"), body = m.optString("body", ""), media = m.optString("media", "");
             String preview = !body.isEmpty() ? body : (!media.isEmpty() ? "📎 media" : "");
-            boolean isNew = MailDb.get(ctx).insert(msgId, o.fromPublicId, false, body, media, m.optString("mime", ""), m.optLong("ts", 0), o.valid);
+            // Dedup a retried MAXIMA send (new transport msgid each attempt) by the
+            // sender's STABLE app-level id. Restricted to the Maxima path ("mx-"):
+            // the coin path already dedups by the stable coinid, and MainActivity's
+            // own coin scan (scanMail) also keys on coinid — switching that to the
+            // app-id would double-insert the same coin. Sender-scoped so two
+            // senders' ids can't collide; falls back for senders that stamp none.
+            String stableId = m.optString("id", "");
+            boolean viaMaxima = msgId != null && msgId.startsWith("mx-");
+            String dedupId = (viaMaxima && !stableId.isEmpty())
+                    ? "id-" + o.fromPublicId + "-" + stableId : msgId;
+            boolean isNew = MailDb.get(ctx).insert(dedupId, o.fromPublicId, false, body, media, m.optString("mime", ""), m.optLong("ts", 0), o.valid);
             // Learn the sender's Maxima address from the message itself, so our
             // reply goes back over Maxima — the transport becomes two-way after a
             // single message, no profile-view required. (Runs even on a duplicate,
