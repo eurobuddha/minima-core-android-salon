@@ -954,6 +954,7 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         reannHandler.removeCallbacks(reannTick);
         reannHandler.post(reannTick);   // renew now (if faded) + reschedule while foreground
+        if (node != null && !node.isEnabled()) startPairingRetry();   // resume pairing retries only if still unpaired
         // While we're foreground, let the shared inbox path (Maxima deliveries and
         // background coin NOTIFY, both static in SalonNotifyReceiver.intakeDm) poke
         // the open tab. Only the on-chain scanMail rendered itself, so a Maxima DM
@@ -975,6 +976,7 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onPause() {
         super.onPause();
         reannHandler.removeCallbacks(reannTick);   // no background beaconing — foreground only
+        pairHandler.removeCallbacks(pairTick);     // stop the 5s SDK-rebuild loop while backgrounded (restarted on resume if still unpaired)
         sInbox = null; sMaximaReady = null;   // don't hold the activity while backgrounded
     }
 
