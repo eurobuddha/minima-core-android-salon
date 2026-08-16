@@ -1016,6 +1016,40 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /** A ScrollView that grows with its content up to a maximum height, then scrolls
+     *  internally — for heterogeneous sections (Gallery grid+carousel+list, Holdings
+     *  rows) that don't map cleanly onto an adapter. Same gesture-claim as
+     *  {@link BoundedRecycler} so the outer ScrollView doesn't steal the drag. */
+    private class BoundedScroll extends ScrollView {
+        private final int maxHpx;
+        BoundedScroll(Context c, int maxHpx) {
+            super(c);
+            this.maxHpx = maxHpx;
+            setVerticalScrollBarEnabled(true);
+            setClipToPadding(false);
+        }
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxHpx, MeasureSpec.AT_MOST));
+        }
+        @Override public boolean dispatchTouchEvent(android.view.MotionEvent e) {
+            int a = e.getActionMasked();
+            if (a == android.view.MotionEvent.ACTION_DOWN) {
+                boolean scrollable = canScrollVertically(1) || canScrollVertically(-1);
+                if (scrollable && getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+            } else if (a == android.view.MotionEvent.ACTION_UP || a == android.view.MotionEvent.ACTION_CANCEL) {
+                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
+            }
+            return super.dispatchTouchEvent(e);
+        }
+    }
+
+    /** Wrap {@code content} in a fixed-height internal scroll if it would run long. */
+    private View boundedBox(View content, int maxHdp) {
+        BoundedScroll bs = new BoundedScroll(this, dp(maxHdp));
+        bs.addView(content, new FrameLayout.LayoutParams(-1, -2));
+        return bs;
+    }
+
     /** A RecyclerView adapter that builds each row imperatively (the app has no XML
      *  layouts). onBind rebuilds the row into a reused FrameLayout — heterogeneous
      *  row heights, but only the visible window is ever bound. */
@@ -1341,7 +1375,11 @@ public class MainActivity extends AppCompatActivity {
         JSONArray gal = p.optJSONArray("gallery");
         if (gal != null && gal.length() > 0) {
             LinearLayout c = card(); c.addView(Design.lot(this, "Gallery"));
-            renderGallery(c, gal);
+            // Bound the gallery to a scroll window so a large collection doesn't
+            // stretch the page. Short galleries measure under the cap and just show.
+            LinearLayout inner = new LinearLayout(this); inner.setOrientation(LinearLayout.VERTICAL);
+            renderGallery(inner, gal);
+            c.addView(boundedBox(inner, 560), lp(0, 2, 0, 0));
             body.addView(c, lp(0, 0, 0, 12));
         }
 
@@ -1409,7 +1447,15 @@ public class MainActivity extends AppCompatActivity {
     /** Render showcased holdings; the VIEWER's node verifies each live. Tap a row to
      *  expand its details + a manual re-verify. */
     private void renderNftShowcase(JSONArray nfts, String profileTokenid) {
-        LinearLayout c = card(); c.addView(Design.lot(this, "Holdings"));
+        LinearLayout c = card();
+        LinearLayout hh = row();
+        hh.addView(Design.lot(this, "Holdings"), new LinearLayout.LayoutParams(0, -2, 1));
+        hh.addView(Design.text(this, String.valueOf(nfts.length()), 11f, Design.DIM(), Design.mono()));
+        c.addView(hh);
+        // Rows go into their own container so a long collection can be a bounded
+        // scroll window — but only while nothing is expanded, so opening a holding
+        // still shows its full artwork and editions at full size.
+        final LinearLayout rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL);
         final String bindHex = NftProof.hexOf(profileTokenid);
         for (int i = 0; i < nfts.length(); i++) {
             final JSONObject n = nfts.optJSONObject(i); if (n == null) continue;
@@ -1426,7 +1472,7 @@ public class MainActivity extends AppCompatActivity {
             r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
             r.addView(Design.text(this, open ? "▾" : "▸", 15, Design.DIM(), Design.mono()));
             r.setOnClickListener(v -> { expandedNft = open ? null : tid; render(); });
-            c.addView(r);
+            rows.addView(r);
             verifyInto(n, bindHex, badge);
 
             if (open) {   // expanded: full main icon (tap→fullscreen), ids, verify, tappable editions gallery
@@ -1444,7 +1490,7 @@ public class MainActivity extends AppCompatActivity {
                 final TextView vline = Design.text(this, "verifying on your node…", 12f, Design.DIM(), Design.mono());
                 d.addView(vline, lp(0, 8, 0, 6));
                 d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline)), lph(44, 0, 4, 0, 0));
-                c.addView(d);
+                rows.addView(d);
                 verifyInto(n, bindHex, vline);
                 // Editions: prefer the PUBLISHED set the owner captured at prove
                 // time (so a remote VIEWER sees the full suite, not just the top
@@ -1460,6 +1506,9 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
+        // Browsing many holdings → bounded scroll window; expanded → full height.
+        if (nfts.length() > 3 && expandedNft == null) c.addView(boundedBox(rows, 520), lp(0, 2, 0, 0));
+        else c.addView(rows);
         body.addView(c, lp(0, 0, 0, 12));
     }
 
