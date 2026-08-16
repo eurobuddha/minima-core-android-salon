@@ -74,8 +74,13 @@ public class MainActivity extends AppCompatActivity {
     private enum Screen { FEED, DISCOVER, HOME, VIEW, EDIT, ONBOARD, SETTINGS, HOSTING, HOSTING_EDIT, MESSAGES, THREAD }
     private Screen screen = Screen.HOME;
     private String threadPeer = "";   // peer msgpk for the open THREAD screen
-    // When replying, a snapshot of the parent message (denormalised quote). Empty = not replying.
-    private String replyBody = "", replyFrom = "";
+    // Reply state, TAGGED to the thread it belongs to (replyPeer) so a reply
+    // started in one chat can never leak into another's composer/DM. Empty = not replying.
+    private String replyBody = "", replyFrom = "", replyPeer = "";
+    // In-progress compose text, preserved across the frequent thread re-renders
+    // (inbound DMs / acks) so a half-typed message isn't wiped. Cleared on peer change / send.
+    private String threadDraft = "";
+    private int threadRenderedCount = -1;   // last rendered message count; auto-scroll only when it grows
 
     private LinearLayout appbar, navRow, body;
     private int mLastKb = 0;   // last real keyboard height, latched through spurious 0-insets
@@ -432,6 +437,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void openThread(String peerpk, String handle, String avatar, String addr) {
         if (peerpk == null || peerpk.isEmpty()) { toast("This account can't receive messages yet."); return; }
+        // Switching to a different peer: drop any in-progress reply and draft so
+        // one conversation's private text can never carry into another's.
+        if (!peerpk.equals(threadPeer)) { replyBody = ""; replyFrom = ""; replyPeer = ""; threadDraft = ""; threadRenderedCount = -1; }
         MailDb db = MailDb.get(this);
         MailDb.Contact ex = db.contact(peerpk);
         db.upsertContact(peerpk, handle, avatar, addr, ex != null ? ex.lastbody : "", ex != null ? ex.lastts : 0, false);
@@ -501,7 +509,8 @@ public class MainActivity extends AppCompatActivity {
         }
         LinearLayout comp = card();
         // Reply banner — the quoted parent, with a cancel, shown above the field.
-        if (!replyBody.isEmpty()) {
+        // Only for a reply that belongs to THIS thread (never another peer's).
+        if (!replyBody.isEmpty() && threadPeer.equals(replyPeer)) {
             LinearLayout rb = row(); rb.setBackground(Design.ruled(this, Design.CARD(), Design.ACCENT(), 1)); rb.setPadding(dp(10), dp(7), dp(8), dp(7));
             LinearLayout rcol = new LinearLayout(this); rcol.setOrientation(LinearLayout.VERTICAL);
             rcol.addView(Design.text(this, "↩ Replying to " + replyFrom, 10f, Design.ACCENT(), Design.sansBold()));
@@ -513,13 +522,19 @@ public class MainActivity extends AppCompatActivity {
             rb.addView(x);
             comp.addView(rb, lp(0, 0, 0, 8));
         }
-        final EditText input = fieldMulti(comp, "Message", "");
+        final EditText input = fieldMulti(comp, "Message", threadDraft);   // restore any preserved draft
+        input.addTextChangedListener(watch(s -> threadDraft = s));          // keep the draft current across re-renders
         LinearLayout crow = row();
         crow.addView(btn("📎", false, this::attachDmMedia), new LinearLayout.LayoutParams(dp(54), dp(46)));
         crow.addView(btn("Send", true, () -> sendDm(text(input), "", "")), weight(46, 6, 0));
         comp.addView(crow, lp(0, 6, 0, 0));
         body.addView(comp, lp(0, 8, 0, 0));
-        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+        // Auto-scroll to the newest only when the message set actually grew (fresh
+        // open or a new message) — not on an ack re-render, so we don't yank a user
+        // who's reading back through history.
+        boolean grew = msgs.size() != threadRenderedCount;
+        threadRenderedCount = msgs.size();
+        if (grew) scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
     }
 
     /** Begin a quoted reply to {@code m}; the banner + send stamp the snapshot. */
@@ -528,6 +543,7 @@ public class MainActivity extends AppCompatActivity {
         if (b.isEmpty()) return;
         replyBody = b;
         replyFrom = m.mine ? "You" : "@" + (peerHandle == null ? "" : peerHandle.replaceFirst("^@", ""));
+        replyPeer = threadPeer;   // this reply belongs to the current thread only
         render();
     }
 
@@ -600,8 +616,8 @@ public class MainActivity extends AppCompatActivity {
         // Carry the quoted-reply snapshot (if replying). replyFrom is from MY side
         // ("You" = my message, else the peer's) — flip it for the wire so the peer
         // reads it from theirs: my message → my handle; their message → "You".
-        final String outReplyBody = replyBody;
-        final String outReplyFrom = replyBody.isEmpty() ? "" : (replyFrom.equals("You") ? myHandle : "You");
+        final String outReplyBody = threadPeer.equals(replyPeer) ? replyBody : "";   // never send another thread's quote
+        final String outReplyFrom = outReplyBody.isEmpty() ? "" : (replyFrom.equals("You") ? myHandle : "You");
         if (!outReplyBody.isEmpty()) { try { msg.put("replybody", outReplyBody); msg.put("replyfrom", outReplyFrom); } catch (Exception ignored) {} }
         final String msgId = "me-" + System.currentTimeMillis() + "-" + Math.abs((body + threadPeer).hashCode());
         // Stable app-level id so retries of the SAME message dedup on the peer
@@ -613,7 +629,7 @@ public class MainActivity extends AppCompatActivity {
         db.insert(msgId, threadPeer, true, body, mediaRef, mediaMime, ts, true, MailDb.PENDING);
         if (!outReplyBody.isEmpty()) db.setReply(msgId, replyBody, replyFrom);   // my local copy keeps MY-side labels
         db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
-        replyBody = ""; replyFrom = "";   // consumed — clear before the re-render
+        replyBody = ""; replyFrom = ""; replyPeer = ""; threadDraft = "";   // consumed — clear before the re-render
         render();
 
         if (viaChain) { coinSendDm(ct, msg, msgId); return; }
