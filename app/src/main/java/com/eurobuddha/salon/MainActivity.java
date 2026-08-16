@@ -73,6 +73,7 @@ public class MainActivity extends AppCompatActivity {
     private String threadPeer = "";   // peer msgpk for the open THREAD screen
 
     private LinearLayout appbar, navRow, body;
+    private int mLastKb = 0;   // last real keyboard height, latched through spurious 0-insets
     private ScrollView scroll;
     private androidx.swiperefreshlayout.widget.SwipeRefreshLayout swipe;
     private FrameLayout rootFrame;
@@ -135,18 +136,34 @@ public class MainActivity extends AppCompatActivity {
 
         WindowInsetsControllerCompat wic = new WindowInsetsControllerCompat(getWindow(), rootFrame);
         wic.setAppearanceLightStatusBars(true); wic.setAppearanceLightNavigationBars(true);
+        final LinearLayout chromeRef = chrome;
         ViewCompat.setOnApplyWindowInsetsListener(rootFrame, (v, insets) -> {
             Insets sys = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+            boolean imeVis = insets.isVisible(WindowInsetsCompat.Type.ime());
+            // The keyboard inset arrives correctly (e.g. 972) but is sometimes
+            // immediately followed by a spurious ime.bottom=0 dispatch while the
+            // keyboard is STILL up. Latch on the visibility flag: hold the last
+            // real height through the spurious 0 so the UI doesn't drop back down.
+            int kb;
+            if (imeVis) {
+                int now = Math.max(0, ime.bottom - sys.bottom);
+                if (now > 0) mLastKb = now;
+                kb = mLastKb;
+            } else {
+                kb = 0; mLastKb = 0;
+            }
             appbar.setPadding(0, sys.top, 0, 0);
-            navRow.setPadding(0, 0, 0, ime.bottom > 0 ? 0 : sys.bottom);
-            // When the keyboard is up, pad the scroll area by its height so the
-            // focused field always scrolls clear of the keyboard (never overlaid).
-            int kb = Math.max(0, ime.bottom - sys.bottom);
-            scroll.setPadding(0, 0, 0, kb);
-            // Padding alone just makes ROOM below the keyboard; on Android 15 the
-            // window no longer resizes for the IME, so nothing scrolls the focused
-            // field into that room. Actively bring it above the keyboard.
+            navRow.setPadding(0, 0, 0, sys.bottom);
+            // LIFT THE WHOLE UI above the keyboard. Padding the scroll's INTERIOR
+            // didn't work: with edge-to-edge (setDecorFitsSystemWindows=false) the
+            // window doesn't resize for the IME on Android 15, so the ScrollView's
+            // on-screen bottom edge still sits UNDER the keyboard and the field
+            // scrolls to a spot the keyboard covers. Padding chrome's bottom by the
+            // keyboard height physically raises the scroll (and nav/mini-player)
+            // above the keyboard; then the focused field is scrolled into view.
+            chromeRef.setPadding(0, 0, 0, kb);
+            scroll.setPadding(0, 0, 0, 0);
             if (kb > 0) {
                 final View f = getCurrentFocus();
                 if (f != null) {
@@ -444,6 +461,13 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout bar = row();
         bar.addView(btn("← Messages", false, () -> go(Screen.MESSAGES)), weight(46, 0, 0));
         body.addView(bar, lp(0, 0, 0, 8));
+        // Which transport carries messages to THIS contact: Maxima (off-chain,
+        // instant) when they publish an mxaddr and ours is up, else the chain.
+        boolean mxThread = ct != null && ct.mxaddr != null && !ct.mxaddr.isEmpty() && MaximaLink.isReady(this);
+        LinearLayout tr = row();
+        tr.addView(Design.pill(this, mxThread ? "⚡ Maxima · off-chain, instant" : "⛓ Minima · on-chain",
+                mxThread ? Design.PILL_MINE : Design.PILL_DIM), new LinearLayout.LayoutParams(-2, -2));
+        body.addView(tr, lp(0, 0, 0, 8));
         List<MailDb.Message> msgs = db.messages(threadPeer);
         if (msgs.isEmpty()) body.addView(Design.note(this, "No messages yet — say hi. Everything here is end-to-end encrypted and sent over the chain."), lp(0, 0, 0, 10));
         for (MailDb.Message m : msgs) body.addView(bubble(m));
@@ -838,8 +862,13 @@ public class MainActivity extends AppCompatActivity {
         return p;
     }
 
-    /** Re-host profile.json (+ the public web renderer) to <handle>/ and announce. */
+    /** Re-host profile.json (+ the public web renderer). Refreshes each holding's
+     *  published editions FIRST so viewers get the full StateNFT collection. */
     private void hostProfile(TextView status, Runnable done) {
+        refreshEditionsThen(() -> doHostProfile(status, done));
+    }
+
+    private void doHostProfile(TextView status, Runnable done) {
         Hosting.Profile def = HostingStore.getDefault(this);
         if (def == null) { if (status != null) status.setText("Set hosting first."); return; }
         String handle = SalonStore.get(this, "handle");
@@ -936,6 +965,8 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout head = card();
         head.addView(Design.note(this, "Everyone on the Salon — read straight off the chain's town square (" + SalonRegistry.SALON_ADDRESS + "). No server, no directory company."));
         body.addView(head, lp(0, 0, 0, 12));
+        // Explicit refresh (pull-to-refresh also works) — re-reads the square.
+        body.addView(btn("↻ Refresh the square", false, () -> { toast("Refreshing…"); render(); }), lph(44, 0, 0, 0, 10));
         TextView status = Design.note(this, "Reading the square…");
         body.addView(status, lp(0, 0, 0, 8));
         if (!nodeUp) { status.setText("Waiting for Minima Core."); return; }
@@ -1064,6 +1095,10 @@ public class MainActivity extends AppCompatActivity {
         idrow.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
         headCard.addView(idrow, lp(0, banner.isEmpty() ? 0 : 10, 0, 6));
         if (!p.optString("bio").isEmpty()) headCard.addView(Design.body(this, p.optString("bio")), lp(0, 4, 0, 2));
+        // Freshness: when a VIEWED page was last published, so you can tell if
+        // someone's Salon has changed since you last looked.
+        long upd = p.optLong("updated", 0);
+        if (!mine && upd > 0) headCard.addView(Design.text(this, "Updated " + Util.ago(upd) + " ago", 10.5f, Design.DIM(), Design.mono()), lp(0, 4, 0, 0));
         // web-validation shield (optional webvalidate URL in profile)
         final LinearLayout shieldSlot = new LinearLayout(this);
         headCard.addView(shieldSlot);
@@ -1350,6 +1385,39 @@ public class MainActivity extends AppCompatActivity {
             }
             done.ready(ed);
         });
+    }
+
+    /** Before publishing, stamp a FRESH edition list onto every proven holding so a
+     *  remote viewer sees the whole collection, not just the icon. Enumerates each
+     *  token's editions this node holds, updates the stored nfts, then runs `done`
+     *  on the UI thread. This is why editions publish reliably regardless of what
+     *  the owner happened to open first. Node-async → callback-chained. */
+    private void refreshEditionsThen(final Runnable done) {
+        final JSONArray arr = SalonStore.arr(this, "nfts");
+        if (!nodeUp || arr.length() == 0) { done.run(); return; }
+        final java.util.concurrent.atomic.AtomicInteger pending =
+                new java.util.concurrent.atomic.AtomicInteger(arr.length());
+        final java.util.concurrent.atomic.AtomicBoolean changed =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        for (int i = 0; i < arr.length(); i++) {
+            final JSONObject o = arr.optJSONObject(i);
+            final String tid = o == null ? "" : o.optString("tokenid");
+            if (tid.isEmpty()) {
+                if (pending.decrementAndGet() == 0) finishEditionRefresh(arr, changed.get(), done);
+                continue;
+            }
+            captureEditions(tid, editions -> {
+                if (editions.length() > 0) {
+                    try { o.put("editions", editions); changed.set(true); } catch (Exception ignored) {}
+                }
+                if (pending.decrementAndGet() == 0) finishEditionRefresh(arr, changed.get(), done);
+            });
+        }
+    }
+
+    private void finishEditionRefresh(JSONArray arr, boolean changed, Runnable done) {
+        if (changed) SalonStore.setArr(this, "nfts", arr);
+        runOnUiThread(done);
     }
 
     /* ---------------- prove & showcase a holding ---------------- */
