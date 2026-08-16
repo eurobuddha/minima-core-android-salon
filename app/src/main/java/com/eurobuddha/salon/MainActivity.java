@@ -153,7 +153,7 @@ public class MainActivity extends AppCompatActivity {
         swipe = new androidx.swiperefreshlayout.widget.SwipeRefreshLayout(this);
         swipe.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         swipe.setColorSchemeColors(Design.ACCENT());
-        swipe.setOnRefreshListener(() -> { render(); swipe.setRefreshing(false); });
+        swipe.setOnRefreshListener(() -> { mProfileCache.clear(); render(); swipe.setRefreshing(false); });   // pull-to-refresh = fetch latest
         chrome.addView(swipe, new LinearLayout.LayoutParams(-1, 0, 1));
 
         buildMiniPlayer();
@@ -1213,6 +1213,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!Hosting.TYPE_RELAY.equals(def.type()))
                     try { up.putFile(SALON_HTML.getBytes("UTF-8"), handle + "/index.html", "text/html"); } catch (Exception ignore) {}
                 Hosting.verifyUrl(url, def);
+                mProfileCache.remove(url);   // your edit is live — don't serve the stale cached copy
                 runOnUiThread(() -> {
                     SalonStore.put(this, "profileUrl", url);
                     if (status != null) status.setText("Live.");
@@ -2924,7 +2925,27 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================= HTTP ================= */
 
-    private JSONObject httpGetJson(String url) {
+    // Short-TTL memo of fetched profile JSON, keyed by url/ref. Feed + Discover re-pull
+    // every followed/listed profile (each up to 1 MB) on EVERY render/swipe/reconnect;
+    // this collapses that to at most one fetch per url per TTL. Pull-to-refresh clears it.
+    private final java.util.Map<String, Object[]> mProfileCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long PROFILE_CACHE_TTL_MS = 90_000L;
+
+    private JSONObject httpGetJson(String url) { return httpGetJson(url, false); }
+
+    /** @param force bypass the memo cache and re-fetch (pull-to-refresh). */
+    private JSONObject httpGetJson(String url, boolean force) {
+        if (url == null) return null;
+        if (!force) {
+            Object[] e = mProfileCache.get(url);
+            if (e != null && System.currentTimeMillis() - (Long) e[1] < PROFILE_CACHE_TTL_MS) return (JSONObject) e[0];
+        }
+        JSONObject j = httpGetJsonRaw(url);
+        if (j != null) mProfileCache.put(url, new Object[]{ j, System.currentTimeMillis() });
+        return j;
+    }
+
+    private JSONObject httpGetJsonRaw(String url) {
         // A profile pointer can be relay1: (encrypted relay) OR mx1: (Maxima mesh)
         // OR a plain http(s) URL. isMediaRef covers BOTH ref schemes; without the
         // mx1: case a mesh-hosted profile fell through to the http branch, failed
