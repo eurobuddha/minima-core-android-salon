@@ -27,6 +27,9 @@ final class SalonComms {
 
     static synchronized String publicId(Context c) { crypto(c); return MSGPK; }
 
+    /** The raw 32-byte seed — also the root of the derived nostr key (NostrKeys). */
+    static byte[] seed(Context c) { return loadOrCreateSeed(c); }
+
     private static byte[] loadOrCreateSeed(Context c) {
         String enc = SalonStore.get(c, "msgseed");
         if (!enc.isEmpty()) {
@@ -51,6 +54,7 @@ final class SalonComms {
             if (s.length != 32) return false;
             SalonStore.put(c, "msgseed", Crypt.encrypt(Hex.to(s)));
             CRYPTO = null; MSGPK = "";
+            NostrKeys.invalidate();   // the derived nostr identity changed with the seed
             SalonStore.put(c, "msgpk", publicId(c));
             return true;
         } catch (Exception e) { return false; }

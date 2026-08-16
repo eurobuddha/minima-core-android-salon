@@ -137,6 +137,8 @@ public class MainActivity extends AppCompatActivity {
         // works fully without Maxima (on-chain DMs), this just upgrades it.
         MaximaLink.connect(this);
 
+        NostrKeys.init(getApplicationContext());   // Blossom uploads sign off the io executor, no Context there
+
         rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(Design.PAPER());
         LinearLayout chrome = new LinearLayout(this);
@@ -1211,8 +1213,10 @@ public class MainActivity extends AppCompatActivity {
         io.execute(() -> {
             try (Hosting.Uploader up = Hosting.forProfile(def)) {
                 String url = up.putFile(profile.toString().getBytes("UTF-8"), handle + "/profile.json", "application/json");
-                // The encrypted relay isn't a web host — skip the browser renderer there.
-                if (!Hosting.TYPE_RELAY.equals(def.type()))
+                // The encrypted relay isn't a web host, and on content-addressed Blossom
+                // the renderer's relative fetch('./profile.json') can never resolve —
+                // skip the browser renderer for both.
+                if (!Hosting.TYPE_RELAY.equals(def.type()) && !Hosting.TYPE_BLOSSOM.equals(def.type()))
                     try { up.putFile(SALON_HTML.getBytes("UTF-8"), handle + "/index.html", "text/html"); } catch (Exception ignore) {}
                 Hosting.verifyUrl(url, def);
                 mProfileCache.remove(url);   // your edit is live — don't serve the stale cached copy
@@ -2577,10 +2581,11 @@ public class MainActivity extends AppCompatActivity {
         addKvPlain(hostCard, "Destination", def == null ? "none set — required" : def.name() + " · " + def.type());
         hostCard.addView(btn(def == null ? "Set up hosting" : "Manage hosting", def == null, () -> go(Screen.HOSTING)), lph(46, 0, 8, 0, 0));
         if (def == null) {
-            // RETIRED (MaxLite sunset) — the one-tap encrypted-relay shortcut is gone; users pick a
-            // host (Maxima mesh or a server) from the hosting screen. To restore, uncomment:
+            // RETIRED (MaxLite sunset) — the one-tap encrypted-relay shortcut is gone. To restore:
             // hostCard.addView(Design.note(this, "No server? Publish to the encrypted relay — zero setup, your page is stored end-to-end encrypted."), lp(0, 8, 0, 4));
             // hostCard.addView(btn("Publish with no server (relay)", false, this::quickStartRelay), lph(44, 0, 4, 0, 0));
+            hostCard.addView(Design.note(this, "No server? Publish to Blossom — free public file hosting on the nostr network, zero setup."), lp(0, 8, 0, 4));
+            hostCard.addView(btn("Publish with no server (Blossom)", false, this::quickStartBlossom), lph(44, 0, 4, 0, 0));
         }
         body.addView(hostCard, lp(0, 0, 0, 12));
 
@@ -2613,7 +2618,8 @@ public class MainActivity extends AppCompatActivity {
                 final String profileUrl;
                 try (Hosting.Uploader up = Hosting.forProfile(def)) {
                     profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), h + "/profile.json", "application/json");
-                    if (!Hosting.TYPE_RELAY.equals(def.type()))
+                    // Content-addressed Blossom: relative fetch can't work — skip the renderer.
+                    if (!Hosting.TYPE_RELAY.equals(def.type()) && !Hosting.TYPE_BLOSSOM.equals(def.type()))
                         try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
                 }
                 Hosting.verifyUrl(profileUrl, def);
@@ -2821,12 +2827,12 @@ public class MainActivity extends AppCompatActivity {
 
     // RETIRED (MaxLite sunset) — encrypted relay dropped from the picker. To restore, re-add
     // Hosting.TYPE_RELAY to HTYPES and "Encrypted relay" to HLABELS at the same index.
-    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_MAXIMA };
-    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Maxima mesh" };
+    private static final String[] HTYPES = { Hosting.TYPE_BLOSSOM, Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_MAXIMA };
+    private static final String[] HLABELS = { "Blossom", "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Maxima mesh" };
 
     private void renderHostingEdit() {
         masthead(hostEdit == null ? "Add destination" : "Edit destination");
-        if (hostEdit == null) hostEdit = Hosting.Profile.fresh(Hosting.TYPE_SFTP);
+        if (hostEdit == null) hostEdit = Hosting.Profile.fresh(Hosting.TYPE_BLOSSOM);
         final Hosting.Profile p = hostEdit;
         LinearLayout card = card();
         EditText nameF = field(card, "Name", p.name(), false, "my server");
@@ -2875,6 +2881,13 @@ public class MainActivity extends AppCompatActivity {
             //     cfgField(card, cfg, "relayUrl", "Relay URL", RelayUploader.DEFAULT_RELAY, false);
             //     card.addView(Design.note(this, "Publish with NO server of your own: your phone encrypts your page + media (libsodium) and uploads only the CIPHERTEXT to this relay's blob store — the relay can never read it. The decryption key travels in your public pointer, so any Salon viewer can see your page.\n\nTrade-offs: viewable in the Salon app only (a web browser can't decrypt it — SFTP/IPFS keep the browser view); and content expires ~7 days after it's last opened/viewed, so open the app now and then to keep it alive."), lp(0, 6, 0, 2));
             //     break;
+            case Hosting.TYPE_BLOSSOM:
+                card.addView(Design.note(this, "Free public file hosting on the nostr network — no account, no password, no server of your own. Files are signed with a key derived from your Salon messaging identity and stored by content hash, so your page stays viewable in any web browser and every republish gets a fresh URL (Salon re-announces it automatically).\n\nThe default server (blossom.primal.net) accepts your page AND media for free. Media-only servers like blossom.band can't host the page itself. Free servers cap file size (typically tens of MB) — large video/audio belongs on SFTP/IPFS/GitHub."), lp(0, 6, 0, 2));
+                cfgField(card, cfg, "endpoint", "Blossom server", BlossomUploader.DEFAULT_SERVER, false);
+                card.addView(Design.kicker(this, "Your nostr identity"), lp(0, 8, 0, 4));
+                copyRow(card, "public key (hex)", NostrKeys.pubkeyHex());
+                copyRow(card, "npub", NostrKeys.npub());
+                break;
             case Hosting.TYPE_MAXIMA:
                 card.addView(Design.note(this, "You are the server. Media is encrypted on your phone, kept HERE, and mirrored across the Maxima relay mesh so it stays reachable while your phone sleeps — no single relay to trust, pay or lose. Needs the Maxima app installed (approve Salon once in Maxima → Connected apps).\n\nViewable in Maxima-capable apps only. This is the decentralised path: 100% of the network is hosted by its users.\n\nSize limit: up to 16 MB per file — great for photos and short clips. Large video/audio won't fit the mesh (it's user-hosted redundancy, not a storage locker); host those on a server type (SFTP/IPFS/GitHub), which has no size limit and stays online without you."
                         + "\n\nProfile budget: " + mibOf(meshUsageBytes()) + " / " + (MAX_PROFILE_MESH_BYTES >> 20) + " MB used (total across all your mesh media). Big libraries belong on a server host."
@@ -3131,6 +3144,17 @@ public class MainActivity extends AppCompatActivity {
             }
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
         } catch (Exception e) { toast("Couldn't open link"); }
+    }
+
+    /** One-tap: create + default a Blossom hosting profile (no server needed). */
+    private void quickStartBlossom() {
+        Hosting.Profile p = Hosting.Profile.fresh(Hosting.TYPE_BLOSSOM);
+        Hosting.put(p.j, "name", "Blossom");
+        Hosting.put(p.cfg(), "endpoint", BlossomUploader.DEFAULT_SERVER);
+        saveHost(p);
+        HostingStore.setDefault(this, p.id());
+        toast("Blossom hosting ready — now claim your handle.");
+        render();
     }
 
     // RETIRED (MaxLite sunset) — one-tap encrypted-relay onboarding. Uncomment to restore:

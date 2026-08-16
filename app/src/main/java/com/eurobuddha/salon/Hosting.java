@@ -10,8 +10,9 @@ import java.util.Locale;
 import java.util.Map;
 
 /** Hosting — upload chosen photos to the USER'S OWN storage and hand back the
- *  public URLs the mint seals on-chain. One profile schema, five backends
- *  (SFTP / WebDAV / kubo IPFS / Pinata / GitHub), one law: what the mint
+ *  public URLs the mint seals on-chain. One profile schema, many backends
+ *  (SFTP / WebDAV / kubo IPFS / Pinata / GitHub / Maxima mesh / Blossom),
+ *  one law: what the mint
  *  writes must be a URL that provably serves, and no remote file is ever
  *  overwritten. Pure helpers are static and mirrored byte-for-byte in the
  *  MiniDapp's hosting.js — parity pinned by shared fixtures under
@@ -29,6 +30,7 @@ final class Hosting {
     static final String TYPE_GITHUB = "github";
     static final String TYPE_RELAY = "relay";
     static final String TYPE_MAXIMA = "maxima";   // self-hosted mesh (you are the server)
+    static final String TYPE_BLOSSOM = "blossom"; // nostr blob storage (content-addressed)
 
     static class Profile {
         JSONObject j;
@@ -117,6 +119,9 @@ final class Hosting {
      *  isDir=true returns a base ending in "/" ready for base+idx+ext. */
     static String publicUrl(Profile p, String relPathOrCid, boolean isDir) {
         String type = p.type();
+        // Blossom is content-addressed: putFile already returns the absolute
+        // descriptor URL, so there is nothing to derive here.
+        if (TYPE_BLOSSOM.equals(type)) return relPathOrCid;
         if (TYPE_KUBO.equals(type) || TYPE_PINATA.equals(type)) {
             String gw = trimSlash(p.cfgStr("gateway"));
             if (gw.isEmpty() && TYPE_PINATA.equals(type)) gw = "https://gateway.pinata.cloud";
@@ -212,6 +217,7 @@ final class Hosting {
             // case TYPE_RELAY:  return new RelayUploader(p);
             case TYPE_RELAY:  throw new HostingException("Encrypted relay hosting is retired — choose Maxima mesh or a server host (SFTP/IPFS/GitHub).");
             case TYPE_MAXIMA: return new MaximaHostUploader(p);
+            case TYPE_BLOSSOM: return new BlossomUploader(p);
             default: throw new HostingException("Unknown destination type: " + p.type());
         }
     }
