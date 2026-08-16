@@ -153,7 +153,7 @@ public class MainActivity extends AppCompatActivity {
         swipe = new androidx.swiperefreshlayout.widget.SwipeRefreshLayout(this);
         swipe.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         swipe.setColorSchemeColors(Design.ACCENT());
-        swipe.setOnRefreshListener(() -> { mProfileCache.clear(); render(); swipe.setRefreshing(false); });   // pull-to-refresh = fetch latest
+        swipe.setOnRefreshListener(() -> { mProfileCache.clear(); mRegistryCache = null; render(); swipe.setRefreshing(false); });   // pull-to-refresh = fetch latest
         chrome.addView(swipe, new LinearLayout.LayoutParams(-1, 0, 1));
 
         buildMiniPlayer();
@@ -1340,7 +1340,7 @@ public class MainActivity extends AppCompatActivity {
         body.addView(status, lp(0, 0, 0, 8));
         if (!nodeUp) { status.setText("Waiting for Minima Core."); return; }
         final int ep = renderEpoch;
-        SalonRegistry.list(node, rawEntries -> runOnUiThread(() -> {
+        registryList(rawEntries -> runOnUiThread(() -> {
             if (ep != renderEpoch) return;   // user navigated away before the square loaded
             body.removeView(status);
             java.util.List<SalonRegistry.Entry> entries = new java.util.ArrayList<>(rawEntries);
@@ -1390,7 +1390,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void openTokenProfile(String tokenid) {
-        SalonRegistry.list(node, entries -> {
+        registryList(entries -> {
             for (SalonRegistry.Entry e : entries) if (e.tokenid.equals(tokenid)) { runOnUiThread(() -> openProfile(e)); return; }
             runOnUiThread(() -> toast("That salon isn't on the square yet."));
         });
@@ -2932,6 +2932,18 @@ public class MainActivity extends AppCompatActivity {
     // this collapses that to at most one fetch per url per TTL. Pull-to-refresh clears it.
     private final java.util.Map<String, Object[]> mProfileCache = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long PROFILE_CACHE_TTL_MS = 90_000L;
+
+    // Memo of the last town-square scan (a depth-1500 chain read). Discover and
+    // openTokenProfile both trigger it; without this, tapping a feed author or
+    // re-rendering Discover re-scans the whole square each time. Cleared on pull-to-refresh.
+    private java.util.List<SalonRegistry.Entry> mRegistryCache;
+    private long mRegistryCacheTs;
+    private static final long REGISTRY_TTL_MS = 60_000L;
+
+    private void registryList(SalonRegistry.Listed cb) {
+        if (mRegistryCache != null && System.currentTimeMillis() - mRegistryCacheTs < REGISTRY_TTL_MS) { cb.done(mRegistryCache); return; }
+        SalonRegistry.list(node, entries -> { mRegistryCache = entries; mRegistryCacheTs = System.currentTimeMillis(); cb.done(entries); });
+    }
 
     private JSONObject httpGetJson(String url) { return httpGetJson(url, false); }
 
