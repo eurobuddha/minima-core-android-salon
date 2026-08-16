@@ -1326,10 +1326,27 @@ public class MainActivity extends AppCompatActivity {
         idrow.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
         headCard.addView(idrow, lp(0, banner.isEmpty() ? 0 : 10, 0, 6));
         if (!p.optString("bio").isEmpty()) headCard.addView(Design.body(this, p.optString("bio")), lp(0, 4, 0, 2));
-        // Freshness: when a VIEWED page was last published, so you can tell if
-        // someone's Salon has changed since you last looked.
+        // Stats — the at-a-glance social summary. Counts come straight off the
+        // profile; "following" is only meaningful (and known) on your own page.
+        LinearLayout stats = row(); boolean anyStat = false;
+        int nPosts = arrLen(p, "posts"), nHold = arrLen(p, "nfts"), nGal = arrLen(p, "gallery");
+        if (nPosts > 0) { stats.addView(statPill(nPosts, "posts")); anyStat = true; }
+        if (nHold  > 0) { stats.addView(statPill(nHold,  nHold == 1 ? "holding" : "holdings")); anyStat = true; }
+        if (nGal   > 0) { stats.addView(statPill(nGal,   "media")); anyStat = true; }
+        if (mine) { int nFol = SalonStore.follows(this).length(); if (nFol > 0) { stats.addView(statPill(nFol, "following")); anyStat = true; } }
+        if (anyStat) {
+            android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
+            hs.setHorizontalScrollBarEnabled(false); hs.addView(stats);   // never clip on narrow screens
+            headCard.addView(hs, lp(0, 8, 0, 2));
+        }
+        // Freshness: when the page was last published, so you can tell if a Salon
+        // has changed since you last looked (shown for your own page too).
         long upd = p.optLong("updated", 0);
-        if (!mine && upd > 0) headCard.addView(Design.text(this, "Updated " + Util.ago(upd) + " ago", 10.5f, Design.DIM(), Design.mono()), lp(0, 4, 0, 0));
+        if (upd > 0) {
+            String ago = Util.ago(upd);
+            String freshness = ago.isEmpty() || ago.equalsIgnoreCase("now") ? "Updated just now" : "Updated " + ago + " ago";
+            headCard.addView(Design.text(this, freshness, 10.5f, Design.DIM(), Design.mono()), lp(0, 6, 0, 0));
+        }
         // web-validation shield (optional webvalidate URL in profile)
         final LinearLayout shieldSlot = new LinearLayout(this);
         headCard.addView(shieldSlot);
@@ -1430,6 +1447,21 @@ public class MainActivity extends AppCompatActivity {
             meta.addView(linkRow("Profile URL", SalonStore.get(this, "profileUrl")));
             body.addView(meta, lp(0, 0, 0, 12));
         }
+    }
+
+    private int arrLen(JSONObject p, String key) { JSONArray a = p.optJSONArray(key); return a == null ? 0 : a.length(); }
+
+    /** A number + label chip for the profile stats row (e.g. "12 POSTS"). */
+    private View statPill(int n, String label) {
+        LinearLayout p = new LinearLayout(this); p.setOrientation(LinearLayout.HORIZONTAL); p.setGravity(Gravity.CENTER_VERTICAL);
+        p.setBackground(Design.ruled(this, Design.CARD(), Design.INK(), 1));
+        p.setPadding(dp(9), dp(5), dp(9), dp(6));
+        p.addView(Design.text(this, String.valueOf(n), 13, Design.INK(), Design.sansBold()));
+        TextView l = Design.text(this, label.toUpperCase(), 9f, Design.DIM(), Design.sansBold()); l.setLetterSpacing(0.08f); l.setPadding(dp(4), 0, 0, 0);
+        p.addView(l);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(8);
+        p.setLayoutParams(lp);
+        return p;
     }
 
     /** One post block for the profile Posts section (inline or windowed row binder). */
