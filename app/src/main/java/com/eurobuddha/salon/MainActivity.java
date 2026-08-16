@@ -1533,6 +1533,37 @@ public class MainActivity extends AppCompatActivity {
         return pc;
     }
 
+    /** A renderable icon for a showcased holding, or null. Resolves the stored
+     *  metadata icon via {@link IconResolver} (unwraps &lt;artimage&gt;/base64/data:/http/
+     *  ipfs), else the first PUBLISHED edition plate ({@code editions[0].url} — already
+     *  a data: URI for embedded StateNFTs, so this backfills existing listings for the
+     *  owner AND remote viewers). null means only a live coin-state read (owner) can
+     *  produce one — see {@link #liveFillNftImage}. */
+    private String nftIcon(JSONObject n) {
+        String icon = IconResolver.resolve(n.optString("image"));
+        if (icon != null) return icon;
+        JSONArray eds = n.optJSONArray("editions");
+        if (eds != null && eds.length() > 0) {
+            JSONObject e0 = eds.optJSONObject(0);
+            String u = e0 == null ? "" : e0.optString("url");
+            if (!u.isEmpty()) return u;
+        }
+        return null;
+    }
+
+    /** Owner-only fallback: pull the embedded plate from the first held coin's
+     *  state[1] and fill {@code iv}. For legacy holdings stored with no icon and no
+     *  captured editions; reuses the working {@link #enumerateEditions} pipeline. */
+    private void liveFillNftImage(final ImageView iv, final String tid, final boolean full) {
+        if (!nodeUp || tid == null || tid.isEmpty()) return;
+        enumerateEditions(tid, editions -> {
+            if (editions == null || editions.isEmpty()) return;
+            final String u = editions.get(0).optString("url");
+            if (u.isEmpty()) return;
+            runOnUiThread(() -> { if (full) ImageLoader.loadFull(this, u, iv); else ImageLoader.loadOver(this, u, iv); });
+        });
+    }
+
     /** Render showcased holdings; the VIEWER's node verifies each live. Tap a row to
      *  expand its details + a manual re-verify. */
     private void renderNftShowcase(JSONArray nfts, String profileTokenid) {
@@ -1552,7 +1583,9 @@ public class MainActivity extends AppCompatActivity {
             final boolean open = tid != null && tid.equals(expandedNft);
             LinearLayout r = row(); r.setPadding(0, dp(8), 0, dp(8)); r.setClickable(true);
             ImageView iv = new ImageView(this); iv.setScaleType(ImageView.ScaleType.CENTER_CROP); iv.setBackgroundColor(0xFF141310);
-            if (!n.optString("image").isEmpty()) ImageLoader.loadOver(this, n.optString("image"), iv);
+            String iconSrc = nftIcon(n);
+            if (iconSrc != null) ImageLoader.loadOver(this, iconSrc, iv);
+            else liveFillNftImage(iv, tid, false);   // embedded plate lives in coin state[1] — pull it live (owner)
             r.addView(iv, new LinearLayout.LayoutParams(dp(46), dp(46)));
             LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(dp(12), 0, dp(8), 0);
             col.addView(Design.text(this, n.optString("name", Util.shorten(tid)), 15, Design.INK(), Design.sansBold()));
@@ -1567,12 +1600,14 @@ public class MainActivity extends AppCompatActivity {
             if (open) {   // expanded: full main icon (tap→fullscreen), ids, verify, tappable editions gallery
                 LinearLayout d = new LinearLayout(this); d.setOrientation(LinearLayout.VERTICAL);
                 d.setPadding(dp(4), dp(2), dp(4), dp(10));
-                final String iconUrl = n.optString("image");
-                if (!iconUrl.isEmpty()) {
-                    ImageView hero = new ImageView(this); hero.setScaleType(ImageView.ScaleType.FIT_CENTER); hero.setBackgroundColor(0xFF141310);
+                final String iconUrl = nftIcon(n);
+                ImageView hero = new ImageView(this); hero.setScaleType(ImageView.ScaleType.FIT_CENTER); hero.setBackgroundColor(0xFF141310);
+                d.addView(hero, new LinearLayout.LayoutParams(-1, dp(300)));
+                if (iconUrl != null) {
                     ImageLoader.loadFull(this, iconUrl, hero); hero.setClickable(true); hero.setOnClickListener(v -> openImage(iconUrl));
-                    d.addView(hero, new LinearLayout.LayoutParams(-1, dp(300)));
                     d.addView(Design.text(this, "tap the artwork to view it full-screen", 10.5f, Design.DIM(), Design.mono()), lp(0, 4, 0, 2));
+                } else {
+                    liveFillNftImage(hero, tid, true);   // embedded plate from coin state[1] (owner)
                 }
                 copyRow(d, "Token id", tid);
                 if (!n.optString("coinid").isEmpty()) copyRow(d, "Coin id", n.optString("coinid"));
@@ -1798,8 +1833,16 @@ public class MainActivity extends AppCompatActivity {
                     Object tok = row.opt("token"); String name = "", image = "";
                     if (tok instanceof JSONObject) {
                         JSONObject tm = (JSONObject) tok;
-                        Object nm = tm.opt("name"); name = nm instanceof JSONObject ? ((JSONObject) nm).optString("name", "") : tm.optString("name", "");
-                        image = firstNonEmpty(tm.optString("url"), tm.optString("icon"), tm.optString("image"));
+                        Object nm = tm.opt("name");
+                        // Atelier/StateNFT metadata is an envelope: the minted JSON (name, url,
+                        // icon, mode, …) lives under token.name. Read the icon from there, then
+                        // resolve <artimage>/base64/data:/http/ipfs into a renderable string.
+                        JSONObject md = nm instanceof JSONObject ? (JSONObject) nm : tm;
+                        name = nm instanceof JSONObject ? md.optString("name", "") : tm.optString("name", "");
+                        String rawIcon = firstNonEmpty(md.optString("url"), md.optString("icon"), md.optString("image"),
+                                tm.optString("url"), tm.optString("icon"), tm.optString("image"));
+                        String resolved = IconResolver.resolve(rawIcon);
+                        image = resolved != null ? resolved : "";
                     } else if (tok instanceof String) name = (String) tok;
                     if (name.isEmpty()) name = Util.shorten(tid);
                     try { JSONObject a = new JSONObject(); a.put("tokenid", tid); a.put("name", name); a.put("image", image); assets.add(a); } catch (Exception ignored) {}
@@ -1827,7 +1870,16 @@ public class MainActivity extends AppCompatActivity {
                 // Capture the editions this node holds so a remote viewer sees the
                 // whole collection, not just the top icon. Then store + publish.
                 captureEditions(asset.optString("tokenid"), editions -> {
-                    try { item.put("editions", editions); } catch (Exception ignored) {}
+                    try {
+                        item.put("editions", editions);
+                        // Embedded StateNFT with no small metadata icon: seed the showcase
+                        // icon from the first edition's plate (a data: URI) so it renders and
+                        // gets baked into profile.json for remote viewers on publish.
+                        if (item.optString("image").isEmpty() && editions != null && editions.length() > 0) {
+                            JSONObject e0 = editions.optJSONObject(0);
+                            if (e0 != null && !e0.optString("url").isEmpty()) item.put("image", e0.optString("url"));
+                        }
+                    } catch (Exception ignored) {}
                     runOnUiThread(() -> { JSONArray a = SalonStore.arr(MainActivity.this, "nfts"); a.put(item); SalonStore.setArr(MainActivity.this, "nfts", a); toast("Proof added — Save & publish to show it."); render(); });
                 });
             }
