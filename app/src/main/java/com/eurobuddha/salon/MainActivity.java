@@ -16,6 +16,7 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -29,6 +30,8 @@ import android.widget.VideoView;
 import android.os.Bundle;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -979,6 +982,61 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /* ================= windowed list (bounded scrolling section) ================= */
+
+    /** A RecyclerView that grows with its content up to a maximum height, then
+     *  scrolls internally — so a section (e.g. the profile's Posts) can hold an
+     *  unbounded number of items without stretching the whole page. Only the
+     *  visible window is ever bound, so memory stays bounded however long it grows. */
+    private class BoundedRecycler extends RecyclerView {
+        private final int maxHpx;
+        BoundedRecycler(Context c, int maxHpx) {
+            super(c);
+            this.maxHpx = maxHpx;
+            setLayoutManager(new LinearLayoutManager(c));
+            setVerticalScrollBarEnabled(true);
+        }
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            // Wrap content up to maxHpx; beyond that, scroll inside this view.
+            super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxHpx, MeasureSpec.AT_MOST));
+        }
+        @Override public boolean dispatchTouchEvent(android.view.MotionEvent e) {
+            // The outer ScrollView is not a nested-scrolling parent, so it would
+            // steal every vertical drag. While this list actually has something to
+            // scroll, claim the gesture so it scrolls internally; release on lift so
+            // dragging over a non-scrolling window still pages the whole screen.
+            int a = e.getActionMasked();
+            if (a == android.view.MotionEvent.ACTION_DOWN) {
+                boolean scrollable = canScrollVertically(1) || canScrollVertically(-1);
+                if (scrollable && getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+            } else if (a == android.view.MotionEvent.ACTION_UP || a == android.view.MotionEvent.ACTION_CANCEL) {
+                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
+            }
+            return super.dispatchTouchEvent(e);
+        }
+    }
+
+    /** A RecyclerView adapter that builds each row imperatively (the app has no XML
+     *  layouts). onBind rebuilds the row into a reused FrameLayout — heterogeneous
+     *  row heights, but only the visible window is ever bound. */
+    private abstract class ImpAdapter<T> extends RecyclerView.Adapter<ImpVH> {
+        final List<T> items = new ArrayList<>();
+        void set(List<T> data) { items.clear(); if (data != null) items.addAll(data); notifyDataSetChanged(); }
+        @Override public ImpVH onCreateViewHolder(ViewGroup p, int vt) {
+            FrameLayout f = new FrameLayout(MainActivity.this);
+            f.setLayoutParams(new RecyclerView.LayoutParams(-1, -2));
+            return new ImpVH(f);
+        }
+        @Override public int getItemCount() { return items.size(); }
+        @Override public void onBindViewHolder(ImpVH h, int pos) {
+            FrameLayout f = (FrameLayout) h.itemView;
+            f.removeAllViews();
+            f.addView(bind(items.get(pos), pos));
+        }
+        abstract View bind(T item, int pos);
+    }
+    private static class ImpVH extends RecyclerView.ViewHolder { ImpVH(View v) { super(v); } }
+
     /* ================= profile model ================= */
 
     /** The public profile.json = identity + rich content, from the local draft. */
@@ -1289,17 +1347,28 @@ public class MainActivity extends AppCompatActivity {
 
         JSONArray posts = p.optJSONArray("posts");
         if (posts != null && posts.length() > 0) {
-            LinearLayout c = card(); c.addView(Design.lot(this, "Posts"));
-            for (int i = posts.length() - 1; i >= 0; i--) {
-                JSONObject post = posts.optJSONObject(i); if (post == null) continue;
-                LinearLayout pc = new LinearLayout(this); pc.setOrientation(LinearLayout.VERTICAL);
-                pc.setPadding(0, dp(8), 0, dp(8));
-                if (i < posts.length() - 1) pc.addView(Design.rule(this, 1), new LinearLayout.LayoutParams(-1, dp(1)));
-                String when = Util.ago(post.optLong("ts", 0));
-                if (!when.isEmpty()) pc.addView(Design.text(this, when, 10f, Design.DIM(), Design.mono()), lp(0, 6, 0, 0));
-                if (!post.optString("text").isEmpty()) pc.addView(Design.body(this, post.optString("text")), lp(0, when.isEmpty() ? 6 : 2, 0, 4));
-                addPostMedia(pc, post);
-                c.addView(pc);
+            LinearLayout c = card();
+            LinearLayout ph = row();
+            ph.addView(Design.lot(this, "Posts"), new LinearLayout.LayoutParams(0, -2, 1));
+            ph.addView(Design.text(this, String.valueOf(posts.length()), 11f, Design.DIM(), Design.mono()));
+            c.addView(ph);
+            // Newest first.
+            final List<JSONObject> plist = new ArrayList<>();
+            for (int i = posts.length() - 1; i >= 0; i--) { JSONObject po = posts.optJSONObject(i); if (po != null) plist.add(po); }
+            // A short page renders inline; once it would run long, the Posts section
+            // becomes a fixed-height window with its own scrollbar so the page as a
+            // whole never gets unruly, no matter how many posts accumulate.
+            final int INLINE_MAX = 4;
+            if (plist.size() <= INLINE_MAX) {
+                for (int i = 0; i < plist.size(); i++) c.addView(buildProfilePost(plist.get(i), i > 0));
+            } else {
+                BoundedRecycler rv = new BoundedRecycler(this, dp(480));
+                ImpAdapter<JSONObject> ad = new ImpAdapter<JSONObject>() {
+                    @Override View bind(JSONObject post, int pos) { return buildProfilePost(post, pos > 0); }
+                };
+                rv.setAdapter(ad); ad.set(plist);
+                c.addView(rv, lp(0, 6, 0, 0));
+                c.addView(Design.text(this, "▲ scroll within — showing all " + plist.size() + " posts", 9.5f, Design.DIM(), Design.mono()), lp(0, 6, 0, 0));
             }
             body.addView(c, lp(0, 0, 0, 12));
         }
@@ -1323,6 +1392,18 @@ public class MainActivity extends AppCompatActivity {
             meta.addView(linkRow("Profile URL", SalonStore.get(this, "profileUrl")));
             body.addView(meta, lp(0, 0, 0, 12));
         }
+    }
+
+    /** One post block for the profile Posts section (inline or windowed row binder). */
+    private View buildProfilePost(JSONObject post, boolean divider) {
+        LinearLayout pc = new LinearLayout(this); pc.setOrientation(LinearLayout.VERTICAL);
+        pc.setPadding(0, dp(8), 0, dp(8));
+        if (divider) pc.addView(Design.rule(this, 1), new LinearLayout.LayoutParams(-1, dp(1)));
+        String when = Util.ago(post.optLong("ts", 0));
+        if (!when.isEmpty()) pc.addView(Design.text(this, when, 10f, Design.DIM(), Design.mono()), lp(0, 6, 0, 0));
+        if (!post.optString("text").isEmpty()) pc.addView(Design.body(this, post.optString("text")), lp(0, when.isEmpty() ? 6 : 2, 0, 4));
+        addPostMedia(pc, post);
+        return pc;
     }
 
     /** Render showcased holdings; the VIEWER's node verifies each live. Tap a row to

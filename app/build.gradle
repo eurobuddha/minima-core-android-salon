@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.salon"
         minSdk 28
         targetSdk 35
-        versionCode 1109
-        versionName "0.11.9"
+        versionCode 1110
+        versionName "0.11.10"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -83,6 +83,8 @@ dependencies {
 
     // pull-to-refresh on Feed / Discover
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    // windowed/recycled list for the profile's Posts section (bounded memory as it grows)
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
 }
