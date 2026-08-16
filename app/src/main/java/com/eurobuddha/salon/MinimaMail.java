@@ -29,6 +29,7 @@ final class MinimaMail {
     static final class Msg {
         final String coinid, fromPublicId, fromHandle, fromAddr, body, mediaRef, mediaMime;
         final long ts; final boolean valid;
+        String stableId = "";   // sender's app-level id from the payload, for cross-transport dedup
         Msg(String coinid, String fromPublicId, String fromHandle, String fromAddr, String body, String mediaRef, String mediaMime, long ts, boolean valid) {
             this.coinid = coinid; this.fromPublicId = fromPublicId; this.fromHandle = fromHandle; this.fromAddr = fromAddr;
             this.body = body; this.mediaRef = mediaRef; this.mediaMime = mediaMime; this.ts = ts; this.valid = valid;
@@ -71,8 +72,10 @@ final class MinimaMail {
                     if (o == null) continue;   // not for me / not a DM
                     try {
                         JSONObject m = new JSONObject(new String(o.plaintext, StandardCharsets.UTF_8));
-                        out.add(new Msg(cid, o.fromPublicId, m.optString("from", "someone"), m.optString("addr", ""),
-                                m.optString("body", ""), m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid));
+                        Msg msg = new Msg(cid, o.fromPublicId, m.optString("from", "someone"), m.optString("addr", ""),
+                                m.optString("body", ""), m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid);
+                        msg.stableId = m.optString("id", "");
+                        out.add(msg);
                     } catch (Exception ignored) {}
                 }
                 cb.onMessages(out);

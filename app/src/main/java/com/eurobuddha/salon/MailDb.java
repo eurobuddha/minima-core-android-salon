@@ -51,18 +51,17 @@ final class MailDb extends SQLiteOpenHelper {
         return insert(coinid, peerpk, mine, body, media, mime, ts, valid, SENT);
     }
 
-    /** Insert with an explicit delivery status (PENDING for an unconfirmed send). */
+    /** Insert with an explicit delivery status (PENDING for an unconfirmed send).
+     *  ATOMIC dedup: relies on the INSERT's conflict result, not a prior SELECT —
+     *  the coin NOTIFY path and scanMail can race on the same coin, and a
+     *  check-then-insert let both see "new" and double-notify. */
     boolean insert(String coinid, String peerpk, boolean mine, String body, String media, String mime, long ts, boolean valid, int status) {
-        SQLiteDatabase db = getWritableDatabase();
-        Cursor cur = db.rawQuery("SELECT 1 FROM messages WHERE coinid=?", new String[]{coinid});
-        boolean exists = cur.moveToFirst(); cur.close();
-        if (exists) return false;
         ContentValues v = new ContentValues();
         v.put("coinid", coinid); v.put("peerpk", peerpk); v.put("mine", mine ? 1 : 0);
         v.put("body", body); v.put("media", media); v.put("mime", mime); v.put("ts", ts); v.put("valid", valid ? 1 : 0);
         v.put("status", status);
-        db.insertWithOnConflict("messages", null, v, SQLiteDatabase.CONFLICT_IGNORE);
-        return true;
+        long row = getWritableDatabase().insertWithOnConflict("messages", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+        return row != -1;   // -1 = the row already existed (conflict ignored) → not new
     }
 
     /** Mark an outgoing message SENT (delivery confirmed / posted). */

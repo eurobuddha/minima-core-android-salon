@@ -75,6 +75,10 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout appbar, navRow, body;
     private int mLastKb = 0;   // last real keyboard height, latched through spurious 0-insets
     private static final String XPORT_PREF = "xport_";   // per-contact transport override
+    /** msgIds currently being transmitted — stops concurrent outbox triggers from
+     *  dispatching the same message twice (a double coin-spend / double delivery). */
+    private final java.util.Set<String> mInFlight =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
     private ScrollView scroll;
     private androidx.swiperefreshlayout.widget.SwipeRefreshLayout swipe;
     private FrameLayout rootFrame;
@@ -265,7 +269,12 @@ public class MainActivity extends AppCompatActivity {
                 if (m.coinid.isEmpty()) continue;
                 if (!m.valid) continue;   // anonymous seal — drop messages whose sender signature doesn't verify (anti-impersonation)
                 String preview = !m.body.isEmpty() ? m.body : (!m.mediaRef.isEmpty() ? "📎 media" : "");
-                boolean isNew = db.insert(m.coinid, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
+                // Dedup on the sender's stable app id when present (agrees with the
+                // Maxima path + the NOTIFY intake), so one logical message is one
+                // bubble regardless of which transport(s) carried it.
+                String dedupId = m.stableId == null || m.stableId.isEmpty()
+                        ? m.coinid : "id-" + m.fromPublicId + "-" + m.stableId;
+                boolean isNew = db.insert(dedupId, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
                 if (isNew) {
                     db.upsertContact(m.fromPublicId, m.fromHandle, "", m.fromAddr, preview, m.ts, !m.fromPublicId.equals(threadPeer));
                     newCount++; lastFrom = m.fromHandle; lastBody = preview;
@@ -568,15 +577,21 @@ public class MainActivity extends AppCompatActivity {
     /** Seal + send a composed DM over Maxima; flip the row to SENT on confirm,
      *  leave it PENDING (for the outbox) on failure. */
     private void sendOverMaxima(final String peerpk, String mxaddr, JSONObject msg, final String msgId) {
+        if (!mInFlight.add(msgId)) return;   // already being sent by another trigger
         String sealedHex;
         try {
             sealedHex = SalonComms.crypto(this).seal(peerpk,
                     msg.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (Exception e) { sealedHex = null; }
-        if (sealedHex == null) { toast("Couldn't seal the message."); return; }   // stays PENDING; retried
+        if (sealedHex == null) {   // stays PENDING; retried
+            mInFlight.remove(msgId);
+            runOnUiThread(() -> toast("Couldn't seal the message."));
+            return;
+        }
         MaximaLink.sendDm(this, mxaddr, sealedHex, new MaximaLink.SendCb() {
             @Override public void onSent(String status, boolean pending) {
                 MailDb.get(MainActivity.this).setStatus(msgId, MailDb.SENT);
+                mInFlight.remove(msgId);
                 runOnUiThread(() -> {
                     if (screen == Screen.THREAD) render();
                     toast(pending ? "Sent ✓ (held until they're online)" : "Sent ✓");
@@ -584,6 +599,7 @@ public class MainActivity extends AppCompatActivity {
             }
             @Override public void onFailed(String error) {
                 // Stays PENDING in the outbox; retried when Maxima reconnects.
+                mInFlight.remove(msgId);
                 runOnUiThread(() -> toast("Queued — will retry over Maxima."));
             }
         });
@@ -593,6 +609,10 @@ public class MainActivity extends AppCompatActivity {
      *  the app comes forward and on the foreground heartbeat, so a message typed
      *  while Maxima was down (or a send that timed out) is not lost. */
     private void retryOutbox() {
+        // Off the UI thread: the loop reads the DB and libsodium-seals each message
+        // (the same heavy work SalonNotifyReceiver offloads). sendOverMaxima /
+        // coinSendDm are thread-safe; their toasts/render hop back to the UI thread.
+        io.execute(() -> {
         java.util.List<MailDb.Message> pend = MailDb.get(this).pendingOutbox();
         if (pend.isEmpty()) return;
         String myHandle = "@" + SalonStore.get(this, "handle");
@@ -621,6 +641,7 @@ public class MainActivity extends AppCompatActivity {
             }
             // else: no transport ready yet (or too fresh to safely re-post) — stays PENDING.
         }
+        });
     }
 
     /** Let the user force the transport for THIS contact, or leave it automatic. */
@@ -650,13 +671,16 @@ public class MainActivity extends AppCompatActivity {
 
     /** The classic path: a 0.001 dust coin with the sealed DM in state[99]. */
     private void coinSendDm(final MailDb.Contact ct, JSONObject msg, final String msgId) {
+        if (!mInFlight.add(msgId)) return;   // already being posted by another trigger
         MinimaMail.send(node, SalonComms.crypto(this), ct.addr, ct.peerpk, msg, new MinimaMail.Cb() {
             @Override public void onSent(String txpowid) {
                 MailDb.get(MainActivity.this).setStatus(msgId, MailDb.SENT);
+                mInFlight.remove(msgId);
                 runOnUiThread(() -> { if (screen == Screen.THREAD) render(); toast("Sent ⛏ (mining)"); });
             }
             @Override public void onFailed(String m) {
                 // Stays PENDING in the outbox; retried when the node is ready.
+                mInFlight.remove(msgId);
                 runOnUiThread(() -> toast("Send failed — queued: " + m));
             }
         });
