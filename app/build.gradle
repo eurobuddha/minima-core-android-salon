@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.salon"
         minSdk 28
         targetSdk 35
-        versionCode 1113
-        versionName "0.11.13"
+        versionCode 1114
+        versionName "0.11.14"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

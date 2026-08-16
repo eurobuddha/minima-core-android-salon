@@ -31,6 +31,7 @@ final class MinimaMail {
         final long ts; final boolean valid;
         String stableId = "";   // sender's app-level id from the payload, for cross-transport dedup
         String replyBody = "", replyFrom = "";   // quoted-reply snapshot (v4)
+        String peerMx = "";     // sender's Maxima address, stamped in every DM — learn it so replies go off-chain
         Msg(String coinid, String fromPublicId, String fromHandle, String fromAddr, String body, String mediaRef, String mediaMime, long ts, boolean valid) {
             this.coinid = coinid; this.fromPublicId = fromPublicId; this.fromHandle = fromHandle; this.fromAddr = fromAddr;
             this.body = body; this.mediaRef = mediaRef; this.mediaMime = mediaMime; this.ts = ts; this.valid = valid;
@@ -77,6 +78,7 @@ final class MinimaMail {
                                 m.optString("body", ""), m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid);
                         msg.stableId = m.optString("id", "");
                         msg.replyBody = m.optString("replybody", ""); msg.replyFrom = m.optString("replyfrom", "");
+                        msg.peerMx = m.optString("mxaddr", "");
                         out.add(msg);
                     } catch (Exception ignored) {}
                 }

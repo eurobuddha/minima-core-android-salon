@@ -160,11 +160,16 @@ final class MailDb extends SQLiteOpenHelper {
         getWritableDatabase().update("messages", v, "coinid=?", new String[]{coinid});
     }
 
-    /** Record (or clear, with "") the peer's Maxima addresses from their profile. */
+    /** Record the peer's Maxima address(es). STICKY: a learned address persists —
+     *  an empty value is a no-op, never a wipe, so a stale/failed profile fetch (or a
+     *  peer who momentarily isn't advertising one) can't strand you back on-chain.
+     *  Once you've Maxima'd someone, you keep knowing where they are; only a fresh
+     *  non-empty address ever replaces the old one. */
     void setMxAddr(String peerpk, String mxaddr) {
+        if (mxaddr == null || mxaddr.isEmpty()) return;   // never clobber a known address with nothing
         ContentValues v = new ContentValues();
         v.put("peerpk", peerpk);
-        v.put("mxaddr", mxaddr == null ? "" : mxaddr);
+        v.put("mxaddr", mxaddr);
         SQLiteDatabase db = getWritableDatabase();
         db.insertWithOnConflict("contacts", null, v, SQLiteDatabase.CONFLICT_IGNORE);
         db.update("contacts", v, "peerpk=?", new String[]{peerpk});

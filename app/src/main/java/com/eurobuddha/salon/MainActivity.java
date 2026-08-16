@@ -281,6 +281,7 @@ public class MainActivity extends AppCompatActivity {
                         ? m.coinid : "id-" + m.fromPublicId + "-" + m.stableId;
                 boolean isNew = db.insert(dedupId, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
                 if (m.replyBody != null && !m.replyBody.isEmpty()) db.setReply(dedupId, m.replyBody, m.replyFrom);
+                db.setMxAddr(m.fromPublicId, m.peerMx);   // learn their Maxima address from an on-chain DM too (sticky, no-op if absent)
                 if (isNew) {
                     db.upsertContact(m.fromPublicId, m.fromHandle, "", m.fromAddr, preview, m.ts, !m.fromPublicId.equals(threadPeer));
                     newCount++; lastFrom = m.fromHandle; lastBody = preview;
@@ -1344,8 +1345,9 @@ public class MainActivity extends AppCompatActivity {
         if (!tipAddr.isEmpty()) {
             LinearLayout arow = row();
             if (canMsg) arow.addView(btn("💬 Message", true, () -> {
-                // Remember how to reach them over Maxima (fresh from their page);
-                // "" clears it if they stopped publishing one.
+                // Learn/refresh their Maxima address from their page. Sticky: an empty
+                // value (stale fetch, or they're not advertising one right now) is a
+                // no-op, so we never lose an address we already knew.
                 MailDb.get(this).setMxAddr(peerMsgpk, peerMx);
                 openThread(peerMsgpk, viewEntry.handle, viewProfile.optString("avatar", ""), tipAddr);
             }), weight(46, 0, 4));
