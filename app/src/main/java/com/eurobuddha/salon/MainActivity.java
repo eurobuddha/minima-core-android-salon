@@ -1345,6 +1345,8 @@ public class MainActivity extends AppCompatActivity {
 
     private boolean viewFailed = false;
     private void openProfile(SalonRegistry.Entry e) {
+        // A holding expanded on one profile must not carry its open state to the next.
+        if (viewEntry == null || !viewEntry.tokenid.equals(e.tokenid)) expandedNft = null;
         viewEntry = e; viewProfile = null; viewFailed = false;
         go(Screen.VIEW);
         io.execute(() -> { JSONObject p = httpGetJson(e.url); runOnUiThread(() -> { viewProfile = p; viewFailed = (p == null); if (screen == Screen.VIEW) render(); }); });
@@ -3093,12 +3095,18 @@ public class MainActivity extends AppCompatActivity {
         + ".g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.g>*{aspect-ratio:1;width:100%;object-fit:cover;border:1.5px solid #141310;background:#000}"
         + ".post{border:1.5px solid #141310;background:#FCFBF7;padding:12px 14px;margin:10px 0;box-shadow:3px 3px 0 #141310}"
         + "video,audio{width:100%}img.pm{width:100%;border:1.5px solid #141310;margin-top:8px}</style></head><body><div class=w>"
-        + "<div id=b></div></div><script>fetch('./profile.json').then(r=>r.json()).then(p=>{var e=function(s){var d=document.createElement('div');d.innerHTML=s;return d.firstChild};"
-        + "var b=document.getElementById('b');var h='';if(p.banner)h+=\"<img class=ban src='\"+p.banner+\"'>\";"
-        + "h+=\"<img class=av src='\"+(p.avatar||'')+\"'>\";h+='<h1>'+(p.name||'')+'</h1>';h+=\"<div class=h>@\"+(p.handle||'')+'</div>';if(p.bio)h+='<div class=bio>'+p.bio+'</div>';"
-        + "if(p.about){h+='<div class=k>About</div><div>'+p.about+'</div>'}"
-        + "if(p.links&&p.links.length){h+='<div class=k>Links</div>';p.links.forEach(function(l){h+=\"<a class=l href='\"+l.url+\"'>\"+(l.label||l.url)+'</a>'})}"
-        + "if(p.gallery&&p.gallery.length){h+='<div class=k>Gallery</div><div class=g>';p.gallery.forEach(function(m){if(m.type=='video')h+=\"<video src='\"+m.url+\"' controls></video>\";else if(m.type=='audio')h+=\"<div style='display:flex;align-items:center;justify-content:center'>&#9835;</div>\";else h+=\"<img src='\"+m.url+\"'>\"});h+='</div>';p.gallery.forEach(function(m){if(m.type=='audio')h+=\"<audio src='\"+m.url+\"' controls></audio>\"})}"
-        + "if(p.posts&&p.posts.length){h+='<div class=k>Posts</div>';p.posts.slice().reverse().forEach(function(t){h+='<div class=post>'+(t.text||'');if(t.media){if(t.type=='video')h+=\"<video src='\"+t.media+\"' controls></video>\";else if(t.type=='audio')h+=\"<audio src='\"+t.media+\"' controls></audio>\";else h+=\"<img class=pm src='\"+t.media+\"'>\"}h+='</div>'})}"
+        + "<div id=b></div></div><script>"
+        // Escape every profile.json field before it enters innerHTML: text is HTML-encoded (x),
+        // URLs are scheme-checked + encoded (u), so a crafted profile can't inject markup/script
+        // or a javascript:/data: URI into the hosted page a visitor trusts.
+        + "var x=function(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,'&#39;').replace(/\"/g,'&quot;')};"
+        + "var u=function(s){s=String(s==null?'':s);return /^\\s*(javascript|data|vbscript):/i.test(s)?'':x(s)};"
+        + "fetch('./profile.json').then(r=>r.json()).then(p=>{"
+        + "var b=document.getElementById('b');var h='';if(p.banner)h+=\"<img class=ban src='\"+u(p.banner)+\"'>\";"
+        + "h+=\"<img class=av src='\"+u(p.avatar||'')+\"'>\";h+='<h1>'+x(p.name||'')+'</h1>';h+=\"<div class=h>@\"+x(p.handle||'')+'</div>';if(p.bio)h+='<div class=bio>'+x(p.bio)+'</div>';"
+        + "if(p.about){h+='<div class=k>About</div><div>'+x(p.about)+'</div>'}"
+        + "if(p.links&&p.links.length){h+='<div class=k>Links</div>';p.links.forEach(function(l){h+=\"<a class=l href='\"+u(l.url)+\"'>\"+x(l.label||l.url)+'</a>'})}"
+        + "if(p.gallery&&p.gallery.length){h+='<div class=k>Gallery</div><div class=g>';p.gallery.forEach(function(m){if(m.type=='video')h+=\"<video src='\"+u(m.url)+\"' controls></video>\";else if(m.type=='audio')h+=\"<div style='display:flex;align-items:center;justify-content:center'>&#9835;</div>\";else h+=\"<img src='\"+u(m.url)+\"'>\"});h+='</div>';p.gallery.forEach(function(m){if(m.type=='audio')h+=\"<audio src='\"+u(m.url)+\"' controls></audio>\"})}"
+        + "if(p.posts&&p.posts.length){h+='<div class=k>Posts</div>';p.posts.slice().reverse().forEach(function(t){h+='<div class=post>'+x(t.text||'');if(t.media){if(t.type=='video')h+=\"<video src='\"+u(t.media)+\"' controls></video>\";else if(t.type=='audio')h+=\"<audio src='\"+u(t.media)+\"' controls></audio>\";else h+=\"<img class=pm src='\"+u(t.media)+\"'>\"}h+='</div>'})}"
         + "b.innerHTML=h}).catch(function(){document.getElementById('b').innerHTML='<p>Profile not found.</p>'})</script></body></html>";
 }

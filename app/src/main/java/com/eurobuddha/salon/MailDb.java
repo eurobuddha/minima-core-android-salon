@@ -90,18 +90,17 @@ final class MailDb extends SQLiteOpenHelper {
 
     void upsertContact(String peerpk, String handle, String avatar, String addr, String lastbody, long lastts, boolean incUnread) {
         SQLiteDatabase db = getWritableDatabase();
-        Cursor cur = db.rawQuery("SELECT unread FROM contacts WHERE peerpk=?", new String[]{peerpk});
-        boolean exists = cur.moveToFirst();
-        int unread = exists ? cur.getInt(0) : 0; cur.close();
-        if (incUnread) unread++;
         ContentValues v = new ContentValues();
         v.put("peerpk", peerpk);
         if (handle != null && !handle.isEmpty()) v.put("handle", handle);
         if (avatar != null && !avatar.isEmpty()) v.put("avatar", avatar);
         if (addr != null && !addr.isEmpty()) v.put("addr", addr);
-        v.put("lastbody", lastbody); v.put("lastts", lastts); v.put("unread", unread);
-        db.insertWithOnConflict("contacts", null, v, SQLiteDatabase.CONFLICT_IGNORE);
-        db.update("contacts", v, "peerpk=?", new String[]{peerpk});   // ensure fields updated on conflict
+        v.put("lastbody", lastbody); v.put("lastts", lastts);
+        db.insertWithOnConflict("contacts", null, v, SQLiteDatabase.CONFLICT_IGNORE);   // ensure row exists (unread defaults 0)
+        db.update("contacts", v, "peerpk=?", new String[]{peerpk});                     // update the non-unread fields
+        // Increment unread ATOMICALLY in SQL, not via read-modify-write — two intake
+        // threads delivering messages concurrently would otherwise lose a count.
+        if (incUnread) db.execSQL("UPDATE contacts SET unread=unread+1 WHERE peerpk=?", new String[]{peerpk});
     }
 
     List<Contact> contacts() {
