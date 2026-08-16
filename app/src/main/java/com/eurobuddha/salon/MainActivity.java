@@ -144,6 +144,16 @@ public class MainActivity extends AppCompatActivity {
             // focused field always scrolls clear of the keyboard (never overlaid).
             int kb = Math.max(0, ime.bottom - sys.bottom);
             scroll.setPadding(0, 0, 0, kb);
+            // Padding alone just makes ROOM below the keyboard; on Android 15 the
+            // window no longer resizes for the IME, so nothing scrolls the focused
+            // field into that room. Actively bring it above the keyboard.
+            if (kb > 0) {
+                final View f = getCurrentFocus();
+                if (f != null) {
+                    f.post(() -> f.requestRectangleOnScreen(
+                            new android.graphics.Rect(0, 0, f.getWidth(), f.getHeight()), false));
+                }
+            }
             return insets;
         });
 
@@ -693,11 +703,36 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         reannHandler.removeCallbacks(reannTick);
         reannHandler.post(reannTick);   // renew now (if faded) + reschedule while foreground
+        // While we're foreground, let the shared inbox path (Maxima deliveries and
+        // background coin NOTIFY, both static in SalonNotifyReceiver.intakeDm) poke
+        // the open tab. Only the on-chain scanMail rendered itself, so a Maxima DM
+        // toasted/notified but never appeared in the Messages tab until you left
+        // and came back. Now any transport repaints it live.
+        sInbox = () -> runOnUiThread(() -> {
+            refreshUnread();
+            if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
+        });
+        refreshUnread();   // catch anything delivered while we were away
+        if (screen == Screen.MESSAGES || screen == Screen.THREAD) render();
     }
 
     @Override protected void onPause() {
         super.onPause();
         reannHandler.removeCallbacks(reannTick);   // no background beaconing — foreground only
+        sInbox = null;   // don't hold the activity while backgrounded
+    }
+
+    /** Set while resumed; SalonNotifyReceiver.intakeDm pokes it after a new DM
+     *  arrives over ANY transport, so the open Messages/Thread tab repaints. */
+    private static volatile Runnable sInbox;
+
+    /** Called by the shared DM intake when a NEW message lands. No-op if no
+     *  activity is foreground (the notification already covers that case). */
+    static void onInboxChanged() {
+        Runnable r = sInbox;
+        if (r != null) {
+            try { r.run(); } catch (Exception ignored) { }
+        }
     }
 
     @Override protected void onDestroy() {
@@ -1156,7 +1191,18 @@ public class MainActivity extends AppCompatActivity {
                 d.addView(btn("Verify again", false, () -> verifyInto(n, bindHex, vline)), lph(44, 0, 4, 0, 0));
                 c.addView(d);
                 verifyInto(n, bindHex, vline);
-                renderEditionArt(d, tid);   // the state-variable editions, as a tappable gallery
+                // Editions: prefer the PUBLISHED set the owner captured at prove
+                // time (so a remote VIEWER sees the full suite, not just the top
+                // icon). Fall back to a live scan of THIS node for the owner's own
+                // page (or legacy items published before editions were captured).
+                JSONArray pubEds = n.optJSONArray("editions");
+                if (pubEds != null && pubEds.length() > 0) {
+                    java.util.List<JSONObject> eds = new java.util.ArrayList<>();
+                    for (int j = 0; j < pubEds.length(); j++) { JSONObject e = pubEds.optJSONObject(j); if (e != null) eds.add(e); }
+                    renderEditionTiles(d, eds, eds.size() + " STATE IMAGE" + (eds.size() == 1 ? "" : "S") + " IN THIS COLLECTION · TAP TO ENLARGE");
+                } else {
+                    renderEditionArt(d, tid);   // live gallery of what this node holds
+                }
             }
         }
         body.addView(c, lp(0, 0, 0, 12));
@@ -1196,23 +1242,30 @@ public class MainActivity extends AppCompatActivity {
         NftProof.generate(node, tid, bindHex, new NftProof.Gen() {
             @Override public void ok(JSONObject item) {
                 try { item.put("name", n.optString("name")); item.put("image", n.optString("image")); } catch (Exception ignored) {}
-                JSONArray arr = SalonStore.arr(MainActivity.this, "nfts");
-                for (int i = 0; i < arr.length(); i++) {
-                    JSONObject o = arr.optJSONObject(i);
-                    if (o != null && tid.equalsIgnoreCase(o.optString("tokenid"))) { try { arr.put(i, item); } catch (Exception ignored) {} SalonStore.setArr(MainActivity.this, "nfts", arr); break; }
-                }
+                // Refresh the published editions too, so an already-proven holding
+                // (added before editions were captured) gains the full suite the
+                // next time the owner opens their own page, and stays current.
+                captureEditions(tid, editions -> {
+                    try { item.put("editions", editions); } catch (Exception ignored) {}
+                    JSONArray arr = SalonStore.arr(MainActivity.this, "nfts");
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject o = arr.optJSONObject(i);
+                        if (o != null && tid.equalsIgnoreCase(o.optString("tokenid"))) { try { arr.put(i, item); } catch (Exception ignored) {} SalonStore.setArr(MainActivity.this, "nfts", arr); break; }
+                    }
+                });
             }
             @Override public void fail(String message) {}
         });
     }
 
-    /** The StateNFT's per-edition state-variable images THIS node holds, as a 2-up gallery —
-     *  each tile taps into a fullscreen, swipeable carousel over every edition. Handles BOTH
-     *  modes: embedded state art, and url-mode ({@code base + index + ext}) collections like
-     *  "gallery bibeau". base/ext from the token metadata (balance); index from each coin's
-     *  state port 0. Empty (silent) for a viewer who holds no editions. */
-    private void renderEditionArt(final LinearLayout parent, final String tokenid) {
-        if (!nodeUp || tokenid == null || tokenid.isEmpty()) return;
+    private interface EditionsCb { void ready(java.util.List<JSONObject> editions); }
+
+    /** Enumerate the StateNFT editions THIS node holds for a token, as {url,caption}
+     *  tiles. Handles BOTH modes: embedded state art, and url-mode
+     *  ({@code base + index + ext}) collections like "gallery bibeau". base/ext from
+     *  the token metadata (balance); index from each coin's state port 0. */
+    private void enumerateEditions(final String tokenid, final EditionsCb cb) {
+        if (!nodeUp || tokenid == null || tokenid.isEmpty()) { cb.ready(java.util.Collections.emptyList()); return; }
         node.cmd("balance tokenid:" + tokenid, new NodeApi.Cb() {
             @Override public void onResult(JSONObject bal) {
                 String base = "", ext = ".png";
@@ -1227,10 +1280,10 @@ public class MainActivity extends AppCompatActivity {
                 final String fbase = base, fext = ext;
                 node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
                     @Override public void onResult(JSONObject r) {
-                        JSONArray arr = r.optJSONArray("response"); if (arr == null) return;
+                        JSONArray arr = r.optJSONArray("response");
                         final java.util.List<JSONObject> editions = new java.util.ArrayList<>();
                         final java.util.HashSet<String> seen = new java.util.HashSet<>();
-                        for (int i = 0; i < arr.length(); i++) {
+                        if (arr != null) for (int i = 0; i < arr.length(); i++) {
                             JSONObject coin = arr.optJSONObject(i); if (coin == null) continue;
                             String u = NftProof.editionImageUrl(coin, fbase, fext);
                             if (u.isEmpty() || !seen.add(u)) continue;
@@ -1239,26 +1292,63 @@ public class MainActivity extends AppCompatActivity {
                                 it.put("caption", idx != null && idx.matches("[0-9]+") ? "Edition #" + idx : "Edition"); editions.add(it); }
                             catch (Exception ignored) {}
                         }
-                        if (editions.isEmpty()) return;
-                        runOnUiThread(() -> {
-                            parent.addView(Design.text(MainActivity.this, editions.size() + " STATE IMAGE" + (editions.size() == 1 ? "" : "S") + " YOU HOLD · TAP TO ENLARGE", 9f, Design.DIM(), Design.sansBold()), lp(0, 12, 0, 6));
-                            LinearLayout g = null;
-                            for (int i = 0; i < editions.size(); i++) {
-                                final int idx = i;
-                                if (i % 2 == 0) { g = row(); parent.addView(g, lp(0, 0, 0, 6)); }
-                                ImageView t = new ImageView(MainActivity.this); t.setScaleType(ImageView.ScaleType.CENTER_CROP); t.setBackgroundColor(0xFF141310);
-                                t.setClickable(true); t.setOnClickListener(v -> openCarousel(editions, idx));
-                                ImageLoader.loadOver(MainActivity.this, editions.get(i).optString("url"), t);
-                                LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(168), 1); tp.setMargins(0, 0, i % 2 == 0 ? dp(6) : 0, 0);
-                                g.addView(t, tp);
-                            }
-                            if (editions.size() % 2 == 1) g.addView(new View(MainActivity.this), new LinearLayout.LayoutParams(0, dp(168), 1));
-                        });
+                        cb.ready(editions);
                     }
-                    @Override public void onError(String m) {}
+                    @Override public void onError(String m) { cb.ready(java.util.Collections.emptyList()); }
                 });
             }
-            @Override public void onError(String m) {}
+            @Override public void onError(String m) { cb.ready(java.util.Collections.emptyList()); }
+        });
+    }
+
+    /** A 2-up grid of edition tiles; each taps into a fullscreen swipeable carousel. */
+    private void renderEditionTiles(final LinearLayout parent, final java.util.List<JSONObject> editions, final String label) {
+        if (editions.isEmpty()) return;
+        parent.addView(Design.text(this, label, 9f, Design.DIM(), Design.sansBold()), lp(0, 12, 0, 6));
+        LinearLayout g = null;
+        for (int i = 0; i < editions.size(); i++) {
+            final int idx = i;
+            if (i % 2 == 0) { g = row(); parent.addView(g, lp(0, 0, 0, 6)); }
+            ImageView t = new ImageView(this); t.setScaleType(ImageView.ScaleType.CENTER_CROP); t.setBackgroundColor(0xFF141310);
+            t.setClickable(true); t.setOnClickListener(v -> openCarousel(editions, idx));
+            ImageLoader.loadOver(this, editions.get(i).optString("url"), t);
+            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(168), 1); tp.setMargins(0, 0, i % 2 == 0 ? dp(6) : 0, 0);
+            g.addView(t, tp);
+        }
+        if (editions.size() % 2 == 1) g.addView(new View(this), new LinearLayout.LayoutParams(0, dp(168), 1));
+    }
+
+    /** Live editions THIS node holds — the owner viewing their own page. Silent for a
+     *  viewer who holds none; a stranger's view uses the PUBLISHED editions instead. */
+    private void renderEditionArt(final LinearLayout parent, final String tokenid) {
+        enumerateEditions(tokenid, editions -> {
+            if (editions.isEmpty()) return;
+            runOnUiThread(() -> renderEditionTiles(parent, editions,
+                    editions.size() + " STATE IMAGE" + (editions.size() == 1 ? "" : "S") + " YOU HOLD · TAP TO ENLARGE"));
+        });
+    }
+
+    /** An edition image url small enough to publish in profile.json (skip embedded
+     *  data: URIs that would bloat the page; keep remote refs). */
+    private boolean isPublishableEditionUrl(String u) {
+        if (u == null || u.length() >= 1024) return false;
+        String s = u.trim().toLowerCase();
+        return s.startsWith("http://") || s.startsWith("https://") || s.startsWith("ipfs:")
+                || s.startsWith("ar://") || s.startsWith("relay1:") || s.startsWith("mx1:");
+    }
+
+    private interface JsonArrayCb { void ready(JSONArray editions); }
+
+    /** Enumerate this node's editions of a token and hand back a publishable JSONArray
+     *  (remote-url editions only, capped) to store in a showcase item. */
+    private void captureEditions(final String tokenid, final JsonArrayCb done) {
+        enumerateEditions(tokenid, editions -> {
+            JSONArray ed = new JSONArray();
+            for (JSONObject e : editions) {
+                if (ed.length() >= 120) break;
+                if (isPublishableEditionUrl(e.optString("url"))) ed.put(e);
+            }
+            done.ready(ed);
         });
     }
 
@@ -1303,7 +1393,12 @@ public class MainActivity extends AppCompatActivity {
         NftProof.generate(node, asset.optString("tokenid"), NftProof.hexOf(myTid), new NftProof.Gen() {
             @Override public void ok(JSONObject item) {
                 try { item.put("name", asset.optString("name")); item.put("image", asset.optString("image")); } catch (Exception ignored) {}
-                runOnUiThread(() -> { JSONArray a = SalonStore.arr(MainActivity.this, "nfts"); a.put(item); SalonStore.setArr(MainActivity.this, "nfts", a); toast("Proof added — Save & publish to show it."); render(); });
+                // Capture the editions this node holds so a remote viewer sees the
+                // whole collection, not just the top icon. Then store + publish.
+                captureEditions(asset.optString("tokenid"), editions -> {
+                    try { item.put("editions", editions); } catch (Exception ignored) {}
+                    runOnUiThread(() -> { JSONArray a = SalonStore.arr(MainActivity.this, "nfts"); a.put(item); SalonStore.setArr(MainActivity.this, "nfts", a); toast("Proof added — Save & publish to show it."); render(); });
+                });
             }
             @Override public void fail(String msg) { runOnUiThread(() -> toast("Couldn't prove: " + msg)); }
         });

@@ -95,6 +95,11 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
             if (isNew) {
                 MailDb.get(ctx).upsertContact(o.fromPublicId, from, "", m.optString("addr", ""), preview, m.optLong("ts", 0), true);
                 notifyStatic(ctx, "💬 @" + from.replaceFirst("^@", ""), preview);
+                // Repaint the open Messages/Thread tab. Without this a Maxima DM
+                // (or a background coin NOTIFY) only notified - it never reached
+                // the live UI, so the message sat in the DB unseen until you
+                // navigated away and back.
+                MainActivity.onInboxChanged();
             }
             return isNew;
         } catch (Exception ignored) {
