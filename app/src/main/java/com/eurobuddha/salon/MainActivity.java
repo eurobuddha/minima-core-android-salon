@@ -1444,25 +1444,30 @@ public class MainActivity extends AppCompatActivity {
                 new java.util.concurrent.atomic.AtomicInteger(arr.length());
         final java.util.concurrent.atomic.AtomicBoolean changed =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
+        // fired guards a SINGLE completion — via all-done OR the timeout below —
+        // so the publish is never stalled by a slow node, and a late edition
+        // callback can't mutate the array while finish is serialising it.
+        final java.util.concurrent.atomic.AtomicBoolean fired =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final Runnable finish = () -> {
+            if (fired.compareAndSet(false, true)) {
+                if (changed.get()) SalonStore.setArr(MainActivity.this, "nfts", arr);
+                runOnUiThread(done);
+            }
+        };
+        // Proceed after 12s with whatever we captured; the rest refresh next publish.
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(finish, 12_000);
         for (int i = 0; i < arr.length(); i++) {
             final JSONObject o = arr.optJSONObject(i);
             final String tid = o == null ? "" : o.optString("tokenid");
-            if (tid.isEmpty()) {
-                if (pending.decrementAndGet() == 0) finishEditionRefresh(arr, changed.get(), done);
-                continue;
-            }
+            if (tid.isEmpty()) { if (pending.decrementAndGet() == 0) finish.run(); continue; }
             captureEditions(tid, editions -> {
-                if (editions.length() > 0) {
+                if (!fired.get() && editions.length() > 0) {
                     try { o.put("editions", editions); changed.set(true); } catch (Exception ignored) {}
                 }
-                if (pending.decrementAndGet() == 0) finishEditionRefresh(arr, changed.get(), done);
+                if (pending.decrementAndGet() == 0) finish.run();
             });
         }
-    }
-
-    private void finishEditionRefresh(JSONArray arr, boolean changed, Runnable done) {
-        if (changed) SalonStore.setArr(this, "nfts", arr);
-        runOnUiThread(done);
     }
 
     /* ---------------- prove & showcase a holding ---------------- */
