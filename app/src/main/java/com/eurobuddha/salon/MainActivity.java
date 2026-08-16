@@ -2883,6 +2883,9 @@ public class MainActivity extends AppCompatActivity {
             //     break;
             case Hosting.TYPE_BLOSSOM:
                 card.addView(Design.note(this, "Free public file hosting on the nostr network — no account, no password, no server of your own. Files are signed with a key derived from your Salon messaging identity and stored by content hash, so your page stays viewable in any web browser and every republish gets a fresh URL (Salon re-announces it automatically).\n\nThe default server (blossom.primal.net) accepts your page AND media for free. Media-only servers like blossom.band can't host the page itself. Free servers cap file size (typically tens of MB) — large video/audio belongs on SFTP/IPFS/GitHub."), lp(0, 6, 0, 2));
+                // Pre-fill the actual value, not just the hint — the field must show
+                // where the page will land without the user typing anything.
+                if (cfg.optString("endpoint", "").isEmpty()) Hosting.put(cfg, "endpoint", BlossomUploader.DEFAULT_SERVER);
                 cfgField(card, cfg, "endpoint", "Blossom server", BlossomUploader.DEFAULT_SERVER, false);
                 card.addView(Design.kicker(this, "Your nostr identity"), lp(0, 8, 0, 4));
                 copyRow(card, "public key (hex)", NostrKeys.pubkeyHex());
