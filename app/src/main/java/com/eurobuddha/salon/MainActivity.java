@@ -1222,6 +1222,40 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    // ---- Maxima mesh budget: a Maxima-hosted profile shares a small, LRU-evicted relay
+    //      shelf with everyone else, so cap its TOTAL footprint. Server hosts are unlimited. ----
+    static final long MAX_PROFILE_MESH_BYTES = 24L * 1024 * 1024;
+
+    /** Plaintext bytes a mesh ({@code mx1:}) ref occupies, read from its embedded manifest
+     *  {@code size}; 0 for a non-mesh ref (http/relay1) or anything unparseable. */
+    private static long meshRefSize(String ref) {
+        if (!MaximaLink.isMediaRef(ref)) return 0;
+        try {
+            byte[] raw = android.util.Base64.decode(ref.substring(MaximaLink.MEDIA_PREFIX.length()),
+                    android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP);
+            JSONObject m = new JSONObject(new String(raw, "UTF-8"));
+            return Math.max(0, Long.parseLong(m.optString("size", "0")));
+        } catch (Exception e) { return 0; }
+    }
+
+    /** Total plaintext bytes THIS profile currently hosts on the Maxima mesh (avatar, banner,
+     *  every gallery item, every post's media). Derived on demand — no separate bookkeeping. */
+    private long meshUsageBytes() {
+        JSONObject p = buildProfileJson();
+        long t = meshRefSize(p.optString("avatar")) + meshRefSize(p.optString("banner"));
+        JSONArray g = p.optJSONArray("gallery");
+        if (g != null) for (int i = 0; i < g.length(); i++) { JSONObject o = g.optJSONObject(i); if (o != null) t += meshRefSize(o.optString("url")); }
+        JSONArray po = p.optJSONArray("posts");
+        if (po != null) for (int i = 0; i < po.length(); i++) { JSONObject o = po.optJSONObject(i); if (o != null) t += meshRefSize(o.optString("media")); }
+        return t;
+    }
+
+    /** Human "12.3 MB" / "8 MB". */
+    private static String mibOf(long b) {
+        double m = b / (1024.0 * 1024.0);
+        return (m >= 10 ? Math.round(m) + "" : (Math.round(m * 10) / 10.0) + "") + " MB";
+    }
+
     /* ================= FEED ================= */
 
     private void renderFeed() {
@@ -2169,6 +2203,18 @@ public class MainActivity extends AppCompatActivity {
                 else if (r == PICK_GALLERY_AUD) { bytes = readCapped(uri, 25); ext = ".mp3"; mime = "audio/mpeg"; kind = "audio"; }
                 else { bytes = readScaledJpeg(uri, r == PICK_AVATAR ? 640 : 1400); ext = ".jpg"; mime = "image/jpeg"; kind = "image"; }
                 String rel = handle + "/media/" + kind + "-" + Long.toString(System.currentTimeMillis(), 36) + ext;
+                // Maxima mesh only: enforce the per-profile total BEFORE any IPC/publish, so a
+                // full profile fails instantly with clear guidance instead of a 90 s round trip.
+                if (Hosting.TYPE_MAXIMA.equals(def.type())) {
+                    long usage = meshUsageBytes();
+                    if (usage + bytes.length > MAX_PROFILE_MESH_BYTES) {
+                        final String msg = "Your Maxima profile is at " + mibOf(usage) + " / "
+                                + (MAX_PROFILE_MESH_BYTES >> 20) + " MB. Remove some media, or switch this "
+                                + "profile to a server host (SFTP/IPFS/GitHub) for unlimited size.";
+                        runOnUiThread(() -> { if (profStatus != null) profStatus.setText(msg); toast("Mesh profile full"); });
+                        return;
+                    }
+                }
                 final String url;
                 try (Hosting.Uploader up = Hosting.forProfile(def)) { url = up.putFile(bytes, rel, mime); }
                 runOnUiThread(() -> {
@@ -2819,6 +2865,7 @@ public class MainActivity extends AppCompatActivity {
                 break;
             case Hosting.TYPE_MAXIMA:
                 card.addView(Design.note(this, "You are the server. Media is encrypted on your phone, kept HERE, and mirrored across the Maxima relay mesh so it stays reachable while your phone sleeps — no single relay to trust, pay or lose. Needs the Maxima app installed (approve Salon once in Maxima → Connected apps).\n\nViewable in Maxima-capable apps only. This is the decentralised path: 100% of the network is hosted by its users.\n\nSize limit: up to 16 MB per file — great for photos and short clips. Large video/audio won't fit the mesh (it's user-hosted redundancy, not a storage locker); host those on a server type (SFTP/IPFS/GitHub), which has no size limit and stays online without you."
+                        + "\n\nProfile budget: " + mibOf(meshUsageBytes()) + " / " + (MAX_PROFILE_MESH_BYTES >> 20) + " MB used (total across all your mesh media). Big libraries belong on a server host."
                         + (MaximaLink.isReady(this) ? "\n\n✓ Maxima connected." : "\n\n⚠ Maxima not connected yet — install/approve it, then reopen this.")), lp(0, 6, 0, 2));
                 break;
         }
