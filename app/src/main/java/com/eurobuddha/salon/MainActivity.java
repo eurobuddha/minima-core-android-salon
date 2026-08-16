@@ -481,37 +481,43 @@ public class MainActivity extends AppCompatActivity {
         db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
         render();
 
-        // DUAL PATH. Maxima first when both sides speak it: free, instant,
-        // off-chain, nothing on the public ledger. The dust-coin path is the
-        // fallback (and the whole path for peers with no Maxima) - the same
-        // sealed blob rides either pipe, so sender verification is identical.
-        boolean viaMaxima = MaximaLink.isReady(this)
-                && ct.mxaddr != null && !ct.mxaddr.isEmpty();
-        if (viaMaxima) {
-            final String sealedHex;
-            String tmp;
-            try {
-                tmp = SalonComms.crypto(this).seal(threadPeer,
-                        msg.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                tmp = null;
-            }
-            sealedHex = tmp;
-            if (sealedHex != null) {
-                MaximaLink.sendDm(this, ct.mxaddr, sealedHex, new MaximaLink.SendCb() {
-                    @Override public void onSent(String status, boolean pending) {
-                        runOnUiThread(() -> toast(pending
-                                ? "Sent ✓ (held until they're online)" : "Sent ✓"));
-                    }
-                    @Override public void onFailed(String error) {
-                        // Fall back to the chain - slower, but it always lands.
-                        runOnUiThread(() -> toast("Sending on-chain instead…"));
-                        coinSendDm(ct, msg);
-                    }
-                });
+        // Maxima is the DEFAULT transport. The on-chain dust-coin path is used
+        // ONLY when the peer is not on Maxima (no mxaddr in their profile). A
+        // Maxima contact is NEVER downgraded to the chain: a send that doesn't
+        // confirm is HELD (the relays mailbox it; the two-tick receipt is the
+        // real delivery signal), not put on the public ledger. The same sealed
+        // blob rides either pipe, so sender verification is identical.
+        boolean hasMx = ct.mxaddr != null && !ct.mxaddr.isEmpty();
+        if (hasMx) {
+            if (!MaximaLink.isReady(this)) {
+                // Peer is Maxima-only and our transport isn't up. Don't fall to
+                // the chain - the message is saved locally as pending; it sends
+                // once Maxima is installed/approved.
+                toast("Maxima isn't connected — install/approve it to message this contact.");
                 return;
             }
+            String sealedHex;
+            try {
+                sealedHex = SalonComms.crypto(this).seal(threadPeer,
+                        msg.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                sealedHex = null;
+            }
+            if (sealedHex == null) { toast("Couldn't seal the message."); return; }
+            MaximaLink.sendDm(this, ct.mxaddr, sealedHex, new MaximaLink.SendCb() {
+                @Override public void onSent(String status, boolean pending) {
+                    runOnUiThread(() -> toast(pending
+                            ? "Sent ✓ (held until they're online)" : "Sent ✓"));
+                }
+                @Override public void onFailed(String error) {
+                    // Maxima contact — hold and retry over Maxima, never on-chain.
+                    runOnUiThread(() -> toast("Held — will deliver over Maxima."));
+                }
+            });
+            return;
         }
+        // No mxaddr: the peer isn't on Maxima, so the chain is the only way
+        // to reach them.
         coinSendDm(ct, msg);
     }
 
