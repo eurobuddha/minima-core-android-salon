@@ -80,7 +80,9 @@ public class MainActivity extends AppCompatActivity {
     // In-progress compose text, preserved across the frequent thread re-renders
     // (inbound DMs / acks) so a half-typed message isn't wiped. Cleared on peer change / send.
     private String threadDraft = "";
-    private int threadRenderedCount = -1;   // last rendered message count; auto-scroll only when it grows
+    private int threadRenderedCount = -1;   // last rendered TOTAL count; auto-scroll only when it grows
+    private static final int THREAD_WINDOW_STEP = 200;
+    private int threadWindow = THREAD_WINDOW_STEP;   // how many recent messages to render; "Load earlier" grows it
 
     private LinearLayout appbar, navRow, body;
     private int mLastKb = 0;   // last real keyboard height, latched through spurious 0-insets
@@ -456,7 +458,7 @@ public class MainActivity extends AppCompatActivity {
         if (peerpk == null || peerpk.isEmpty()) { toast("This account can't receive messages yet."); return; }
         // Switching to a different peer: drop any in-progress reply and draft so
         // one conversation's private text can never carry into another's.
-        if (!peerpk.equals(threadPeer)) { replyBody = ""; replyFrom = ""; replyPeer = ""; threadDraft = ""; threadRenderedCount = -1; }
+        if (!peerpk.equals(threadPeer)) { replyBody = ""; replyFrom = ""; replyPeer = ""; threadDraft = ""; threadRenderedCount = -1; threadWindow = THREAD_WINDOW_STEP; }
         MailDb db = MailDb.get(this);
         MailDb.Contact ex = db.contact(peerpk);
         db.upsertContact(peerpk, handle, avatar, addr, ex != null ? ex.lastbody : "", ex != null ? ex.lastts : 0, false);
@@ -516,8 +518,16 @@ public class MainActivity extends AppCompatActivity {
         tr.addView(chip, new LinearLayout.LayoutParams(-2, -2));
         body.addView(tr, lp(0, 0, 0, 8));
         final String peerHandle = handle;
-        List<MailDb.Message> msgs = db.messages(threadPeer);
+        // Windowed: render only the most-recent threadWindow messages so a long thread
+        // doesn't rebuild hundreds of View bubbles (and hold them all in heap) on every
+        // ack/inbound re-render. "Load earlier" grows the window on demand.
+        int total = db.messageCount(threadPeer);
+        List<MailDb.Message> msgs = db.messages(threadPeer, threadWindow);
         if (msgs.isEmpty()) body.addView(Design.note(this, "No messages yet — say hi. Everything here is end-to-end encrypted and sent over the chain. Long-press a message to reply."), lp(0, 0, 0, 10));
+        if (total > msgs.size()) {
+            body.addView(btn("↑ Load earlier (" + (total - msgs.size()) + " more)", false,
+                    () -> { threadWindow += THREAD_WINDOW_STEP; render(); }), lp(0, 0, 0, 6));
+        }
         for (MailDb.Message m : msgs) {
             View bv = bubble(m);
             final MailDb.Message fm = m;
@@ -549,8 +559,8 @@ public class MainActivity extends AppCompatActivity {
         // Auto-scroll to the newest only when the message set actually grew (fresh
         // open or a new message) — not on an ack re-render, so we don't yank a user
         // who's reading back through history.
-        boolean grew = msgs.size() != threadRenderedCount;
-        threadRenderedCount = msgs.size();
+        boolean grew = total != threadRenderedCount;   // a NEW message (total up), not "load earlier" (window up)
+        threadRenderedCount = total;
         if (grew) scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
     }
 

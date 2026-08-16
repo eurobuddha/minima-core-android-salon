@@ -141,6 +141,25 @@ final class MailDb extends SQLiteOpenHelper {
         return out;
     }
 
+    /** The newest {@code limit} messages, returned oldest-first for natural
+     *  top-to-bottom render. Bounds View creation + heap for a long thread. */
+    List<Message> messages(String peerpk, int limit) {
+        List<Message> out = new ArrayList<>();
+        Cursor cur = getReadableDatabase().rawQuery(
+                "SELECT coinid,peerpk,mine,body,media,mime,ts,valid,status,replybody,replyfrom FROM messages WHERE peerpk=? ORDER BY ts DESC LIMIT ?",
+                new String[]{peerpk, String.valueOf(limit)});
+        while (cur.moveToNext()) out.add(readMsg(cur));
+        cur.close();
+        java.util.Collections.reverse(out);
+        return out;
+    }
+
+    int messageCount(String peerpk) {
+        Cursor cur = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM messages WHERE peerpk=?", new String[]{peerpk});
+        int n = cur.moveToFirst() ? cur.getInt(0) : 0; cur.close();
+        return n;
+    }
+
     private static Message readMsg(Cursor cur) {
         Message m = new Message();
         m.coinid = cur.getString(0); m.peerpk = cur.getString(1); m.mine = cur.getInt(2) == 1;
