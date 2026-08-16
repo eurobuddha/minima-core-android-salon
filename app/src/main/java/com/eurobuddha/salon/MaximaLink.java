@@ -210,8 +210,24 @@ final class MaximaLink {
     static final String X_OP = "op";
     static final String X_DATA_LEN = "datalen";
 
+    /**
+     * Per-file ceiling for the mesh, mirroring Maxima's own
+     * {@code MediaService.MAX_MESH_FILE_BYTES}. The mesh is user-hosted and
+     * best-effort: a bigger file can't get a durable off-phone replica (relay
+     * put-rate + small shared, LRU-evicted blob shelves), so we reject it HERE,
+     * before staging or any IPC, with a clear "use a server host" message —
+     * never a 90s round-trip that ends in a timeout. Server hosting types
+     * (SFTP/IPFS/GitHub/…) carry the large files. Keep in lockstep with core. */
+    static final long MESH_MAX_BYTES = 16L * 1024 * 1024;
+
     static boolean isMediaRef(String s) {
         return s != null && s.startsWith(MEDIA_PREFIX);
+    }
+
+    /** Human "12.3 MB" for the size-limit message. */
+    private static String mib(long zBytes) {
+        double m = zBytes / (1024.0 * 1024.0);
+        return (m >= 10 ? Math.round(m) + "" : (Math.round(m * 10) / 10.0) + "") + " MB";
     }
 
     /**
@@ -220,6 +236,13 @@ final class MaximaLink {
      */
     static String putMedia(byte[] zBytes, String zMime) throws Exception {
         Context ctx = requireApp();
+        // Reject oversize up front — no staging, no IPC, no 90s wait. The mesh
+        // can't durably host it; the caller must use a server host instead.
+        if (zBytes.length > MESH_MAX_BYTES) {
+            throw new Exception("Maxima mesh supports files up to "
+                    + (MESH_MAX_BYTES >> 20) + " MB. This file is " + mib(zBytes.length)
+                    + " — host it on a server (SFTP/IPFS/GitHub) or compress it first.");
+        }
         // Hand the bytes to Maxima as a content:// grant (they can exceed the
         // broadcast parcel limit).
         android.net.Uri uri = stageForMaxima(ctx, zBytes);

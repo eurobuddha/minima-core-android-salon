@@ -21,7 +21,11 @@ final class MaximaHostUploader implements Hosting.Uploader {
         try {
             return MaximaLink.putMedia(bytes, mime);
         } catch (Exception e) {
-            throw new Hosting.HostingException("Maxima media publish failed: " + e.getMessage());
+            // Name the offending asset so a multi-file profile publish points at
+            // the exact file (e.g. an oversize video) rather than failing vaguely.
+            String file = relPath == null ? "" : relPath.substring(relPath.lastIndexOf('/') + 1);
+            throw new Hosting.HostingException(
+                    (file.isEmpty() ? "" : "“" + file + "”: ") + e.getMessage());
         }
     }
 
