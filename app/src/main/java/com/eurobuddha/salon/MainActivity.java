@@ -2185,11 +2185,14 @@ public class MainActivity extends AppCompatActivity {
             io.execute(() -> {
                 try {
                     byte[] jpeg = readScaledJpeg(uri, 1400);
-                    // Prefer the Maxima mesh (you host it, no central relay);
-                    // fall back to the encrypted relay when Maxima isn't ready.
-                    String type = MaximaLink.isReady(this) ? Hosting.TYPE_MAXIMA : Hosting.TYPE_RELAY;
-                    String ref = Hosting.forProfile(Hosting.Profile.fresh(type))
-                            .putFile(jpeg, "dm.jpg", "image/jpeg");
+                    // Prefer the Maxima mesh (you host it, no central relay). The encrypted-relay
+                    // fallback is RETIRED (MaxLite sunset) — fall back to the user's configured
+                    // default host instead, and if there's none, ask them to set one up.
+                    Hosting.Profile host = MaximaLink.isReady(this)
+                            ? Hosting.Profile.fresh(Hosting.TYPE_MAXIMA)
+                            : HostingStore.getDefault(this);
+                    if (host == null) { runOnUiThread(() -> toast("Set up hosting (or install Maxima) to send photos")); return; }
+                    String ref = Hosting.forProfile(host).putFile(jpeg, "dm.jpg", "image/jpeg");
                     runOnUiThread(() -> sendDm("", ref, "image/jpeg"));
                 } catch (Exception e) { runOnUiThread(() -> toast("Photo failed: " + e.getMessage())); }
             });
@@ -2574,8 +2577,10 @@ public class MainActivity extends AppCompatActivity {
         addKvPlain(hostCard, "Destination", def == null ? "none set — required" : def.name() + " · " + def.type());
         hostCard.addView(btn(def == null ? "Set up hosting" : "Manage hosting", def == null, () -> go(Screen.HOSTING)), lph(46, 0, 8, 0, 0));
         if (def == null) {
-            hostCard.addView(Design.note(this, "No server? Publish to the encrypted relay — zero setup, your page is stored end-to-end encrypted."), lp(0, 8, 0, 4));
-            hostCard.addView(btn("Publish with no server (relay)", false, this::quickStartRelay), lph(44, 0, 4, 0, 0));
+            // RETIRED (MaxLite sunset) — the one-tap encrypted-relay shortcut is gone; users pick a
+            // host (Maxima mesh or a server) from the hosting screen. To restore, uncomment:
+            // hostCard.addView(Design.note(this, "No server? Publish to the encrypted relay — zero setup, your page is stored end-to-end encrypted."), lp(0, 8, 0, 4));
+            // hostCard.addView(btn("Publish with no server (relay)", false, this::quickStartRelay), lph(44, 0, 4, 0, 0));
         }
         body.addView(hostCard, lp(0, 0, 0, 12));
 
@@ -2814,8 +2819,10 @@ public class MainActivity extends AppCompatActivity {
         body.addView(btn("Add destination", true, () -> { hostEdit = null; go(Screen.HOSTING_EDIT); }), lph(52, 0, 4, 0, 8));
     }
 
-    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_RELAY, Hosting.TYPE_MAXIMA };
-    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Encrypted relay", "Maxima mesh" };
+    // RETIRED (MaxLite sunset) — encrypted relay dropped from the picker. To restore, re-add
+    // Hosting.TYPE_RELAY to HTYPES and "Encrypted relay" to HLABELS at the same index.
+    private static final String[] HTYPES = { Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_MAXIMA };
+    private static final String[] HLABELS = { "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Maxima mesh" };
 
     private void renderHostingEdit() {
         masthead(hostEdit == null ? "Add destination" : "Edit destination");
@@ -2862,10 +2869,12 @@ public class MainActivity extends AppCompatActivity {
                         + "3. Serve via 'raw' works instantly (raw.githubusercontent.com). For 'pages': in the repo Settings → Pages, enable Pages from your branch, then set Pages prefix to https://<owner>.github.io/<repo>/.\n"
                         + "Branch 'main' is fine. Then Save & test."), lp(0, 6, 0, 4));
                 cfgField(card, cfg, "owner", "Owner (GitHub username)", "", false); cfgField(card, cfg, "repo", "Repo name", "salon", false); cfgField(card, cfg, "branch", "Branch", "main", false); cfgSecret(card, cfg, "token", "Token (PAT — Contents: read & write)"); cfgField(card, cfg, "serve", "Serve via (raw / pages)", "raw", false); cfgField(card, cfg, "pagesPrefix", "Pages prefix (only if serve=pages)", "https://you.github.io/salon/", false); break;
-            case Hosting.TYPE_RELAY:
-                cfgField(card, cfg, "relayUrl", "Relay URL", RelayUploader.DEFAULT_RELAY, false);
-                card.addView(Design.note(this, "Publish with NO server of your own: your phone encrypts your page + media (libsodium) and uploads only the CIPHERTEXT to this relay's blob store — the relay can never read it. The decryption key travels in your public pointer, so any Salon viewer can see your page.\n\nTrade-offs: viewable in the Salon app only (a web browser can't decrypt it — SFTP/IPFS keep the browser view); and content expires ~7 days after it's last opened/viewed, so open the app now and then to keep it alive."), lp(0, 6, 0, 2));
-                break;
+            // RETIRED (MaxLite sunset) — encrypted-relay config UI removed from the picker. To
+            // restore, re-add TYPE_RELAY to HTYPES/HLABELS and uncomment this case:
+            // case Hosting.TYPE_RELAY:
+            //     cfgField(card, cfg, "relayUrl", "Relay URL", RelayUploader.DEFAULT_RELAY, false);
+            //     card.addView(Design.note(this, "Publish with NO server of your own: your phone encrypts your page + media (libsodium) and uploads only the CIPHERTEXT to this relay's blob store — the relay can never read it. The decryption key travels in your public pointer, so any Salon viewer can see your page.\n\nTrade-offs: viewable in the Salon app only (a web browser can't decrypt it — SFTP/IPFS keep the browser view); and content expires ~7 days after it's last opened/viewed, so open the app now and then to keep it alive."), lp(0, 6, 0, 2));
+            //     break;
             case Hosting.TYPE_MAXIMA:
                 card.addView(Design.note(this, "You are the server. Media is encrypted on your phone, kept HERE, and mirrored across the Maxima relay mesh so it stays reachable while your phone sleeps — no single relay to trust, pay or lose. Needs the Maxima app installed (approve Salon once in Maxima → Connected apps).\n\nViewable in Maxima-capable apps only. This is the decentralised path: 100% of the network is hosted by its users.\n\nSize limit: up to 16 MB per file — great for photos and short clips. Large video/audio won't fit the mesh (it's user-hosted redundancy, not a storage locker); host those on a server type (SFTP/IPFS/GitHub), which has no size limit and stays online without you."
                         + "\n\nProfile budget: " + mibOf(meshUsageBytes()) + " / " + (MAX_PROFILE_MESH_BYTES >> 20) + " MB used (total across all your mesh media). Big libraries belong on a server host."
@@ -3124,15 +3133,16 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) { toast("Couldn't open link"); }
     }
 
-    /** One-tap: create + default an encrypted-relay hosting profile (no server needed). */
-    private void quickStartRelay() {
-        Hosting.Profile p = Hosting.Profile.fresh(Hosting.TYPE_RELAY);
-        Hosting.put(p.j, "name", "Encrypted relay");
-        saveHost(p);
-        HostingStore.setDefault(this, p.id());
-        toast("Relay hosting ready — now claim your handle.");
-        render();
-    }
+    // RETIRED (MaxLite sunset) — one-tap encrypted-relay onboarding. Uncomment to restore:
+    // /** One-tap: create + default an encrypted-relay hosting profile (no server needed). */
+    // private void quickStartRelay() {
+    //     Hosting.Profile p = Hosting.Profile.fresh(Hosting.TYPE_RELAY);
+    //     Hosting.put(p.j, "name", "Encrypted relay");
+    //     saveHost(p);
+    //     HostingStore.setDefault(this, p.id());
+    //     toast("Relay hosting ready — now claim your handle.");
+    //     render();
+    // }
 
     private void sharePage(String url) {
         try {

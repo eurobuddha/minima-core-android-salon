@@ -208,7 +208,9 @@ final class Hosting {
             case TYPE_KUBO:   return new IpfsUploader(p);
             case TYPE_PINATA: return new PinataUploader(p);
             case TYPE_GITHUB: return new GithubUploader(p);
-            case TYPE_RELAY:  return new RelayUploader(p);
+            // RETIRED (MaxLite sunset) — uncomment to restore encrypted-relay publishing:
+            // case TYPE_RELAY:  return new RelayUploader(p);
+            case TYPE_RELAY:  throw new HostingException("Encrypted relay hosting is retired — choose Maxima mesh or a server host (SFTP/IPFS/GitHub).");
             case TYPE_MAXIMA: return new MaximaHostUploader(p);
             default: throw new HostingException("Unknown destination type: " + p.type());
         }
