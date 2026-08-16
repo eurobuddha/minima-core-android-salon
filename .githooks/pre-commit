@@ -1,0 +1,43 @@
+#!/bin/sh
+# ============================================================================
+# Salon guardrail — REAL FUNDS, REAL CHAIN, REAL COMPLEXITY.
+#
+# THE RULE: every code change ships with a version bump, so every committed
+# state is distinct, reversible and trackable. No silent overwrites.
+#
+# This hook BLOCKS a commit that touches app code (app/src/**) unless
+# app/build.gradle's versionCode also changed versus HEAD.
+#
+# Bypassing with --no-verify is the exact mistake this exists to prevent.
+# Don't. If you're reverting, bump the version anyway.
+# ============================================================================
+
+staged=$(git diff --cached --name-only)
+[ -z "$staged" ] && exit 0
+
+# Does this commit touch app code? (docs / hooks / config-only commits are fine.)
+code=$(printf '%s\n' "$staged" | grep -E '^app/src/')
+[ -z "$code" ] && exit 0
+
+# versionCode in the STAGED build.gradle (index) vs HEAD.
+staged_vc=$(git show :app/build.gradle 2>/dev/null | grep -E 'versionCode[[:space:]]+[0-9]+' | head -1 | grep -oE '[0-9]+' | head -1)
+head_vc=$(git show HEAD:app/build.gradle 2>/dev/null | grep -E 'versionCode[[:space:]]+[0-9]+' | head -1 | grep -oE '[0-9]+' | head -1)
+
+# Fall back to the working-tree file if the index read came back empty.
+[ -z "$staged_vc" ] && staged_vc=$(grep -E 'versionCode[[:space:]]+[0-9]+' app/build.gradle 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1)
+
+if [ -n "$head_vc" ] && [ "$staged_vc" = "$head_vc" ]; then
+  echo "──────────────────────────────────────────────────────────────────"
+  echo "  COMMIT BLOCKED — app/src changed but versionCode did NOT bump."
+  echo "  versionCode is still $head_vc."
+  echo ""
+  echo "  Rule: every code change ships with a version bump so every state"
+  echo "  is committed, reversible and trackable (real funds, real chain)."
+  echo ""
+  echo "  Fix: bump versionCode + versionName in app/build.gradle, stage it,"
+  echo "  then commit again."
+  echo "──────────────────────────────────────────────────────────────────"
+  exit 1
+fi
+
+exit 0
