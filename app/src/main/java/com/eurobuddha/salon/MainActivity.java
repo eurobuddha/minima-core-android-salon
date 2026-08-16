@@ -74,6 +74,8 @@ public class MainActivity extends AppCompatActivity {
     private enum Screen { FEED, DISCOVER, HOME, VIEW, EDIT, ONBOARD, SETTINGS, HOSTING, HOSTING_EDIT, MESSAGES, THREAD }
     private Screen screen = Screen.HOME;
     private String threadPeer = "";   // peer msgpk for the open THREAD screen
+    // When replying, a snapshot of the parent message (denormalised quote). Empty = not replying.
+    private String replyBody = "", replyFrom = "";
 
     private LinearLayout appbar, navRow, body;
     private int mLastKb = 0;   // last real keyboard height, latched through spurious 0-insets
@@ -278,6 +280,7 @@ public class MainActivity extends AppCompatActivity {
                 String dedupId = m.stableId == null || m.stableId.isEmpty()
                         ? m.coinid : "id-" + m.fromPublicId + "-" + m.stableId;
                 boolean isNew = db.insert(dedupId, m.fromPublicId, false, m.body, m.mediaRef, m.mediaMime, m.ts, m.valid);
+                if (m.replyBody != null && !m.replyBody.isEmpty()) db.setReply(dedupId, m.replyBody, m.replyFrom);
                 if (isNew) {
                     db.upsertContact(m.fromPublicId, m.fromHandle, "", m.fromAddr, preview, m.ts, !m.fromPublicId.equals(threadPeer));
                     newCount++; lastFrom = m.fromHandle; lastBody = preview;
@@ -486,10 +489,29 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout tr = row();
         tr.addView(chip, new LinearLayout.LayoutParams(-2, -2));
         body.addView(tr, lp(0, 0, 0, 8));
+        final String peerHandle = handle;
         List<MailDb.Message> msgs = db.messages(threadPeer);
-        if (msgs.isEmpty()) body.addView(Design.note(this, "No messages yet — say hi. Everything here is end-to-end encrypted and sent over the chain."), lp(0, 0, 0, 10));
-        for (MailDb.Message m : msgs) body.addView(bubble(m));
+        if (msgs.isEmpty()) body.addView(Design.note(this, "No messages yet — say hi. Everything here is end-to-end encrypted and sent over the chain. Long-press a message to reply."), lp(0, 0, 0, 10));
+        for (MailDb.Message m : msgs) {
+            View bv = bubble(m);
+            final MailDb.Message fm = m;
+            bv.setOnLongClickListener(v -> { startReply(fm, peerHandle); return true; });
+            body.addView(bv);
+        }
         LinearLayout comp = card();
+        // Reply banner — the quoted parent, with a cancel, shown above the field.
+        if (!replyBody.isEmpty()) {
+            LinearLayout rb = row(); rb.setBackground(Design.ruled(this, Design.CARD(), Design.ACCENT(), 1)); rb.setPadding(dp(10), dp(7), dp(8), dp(7));
+            LinearLayout rcol = new LinearLayout(this); rcol.setOrientation(LinearLayout.VERTICAL);
+            rcol.addView(Design.text(this, "↩ Replying to " + replyFrom, 10f, Design.ACCENT(), Design.sansBold()));
+            TextView rsnip = Design.text(this, replyBody, 12f, Design.DIM(), Design.sans()); rsnip.setMaxLines(1); rsnip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            rcol.addView(rsnip);
+            rb.addView(rcol, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView x = Design.text(this, "✕", 16, Design.DIM(), Design.sansBold()); x.setPadding(dp(10), 0, dp(4), 0); x.setClickable(true);
+            x.setOnClickListener(v -> { replyBody = ""; replyFrom = ""; render(); });
+            rb.addView(x);
+            comp.addView(rb, lp(0, 0, 0, 8));
+        }
         final EditText input = fieldMulti(comp, "Message", "");
         LinearLayout crow = row();
         crow.addView(btn("📎", false, this::attachDmMedia), new LinearLayout.LayoutParams(dp(54), dp(46)));
@@ -499,10 +521,30 @@ public class MainActivity extends AppCompatActivity {
         scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
     }
 
+    /** Begin a quoted reply to {@code m}; the banner + send stamp the snapshot. */
+    private void startReply(MailDb.Message m, String peerHandle) {
+        String b = m.body != null && !m.body.isEmpty() ? m.body : (m.media != null && !m.media.isEmpty() ? "📎 media" : "");
+        if (b.isEmpty()) return;
+        replyBody = b;
+        replyFrom = m.mine ? "You" : "@" + (peerHandle == null ? "" : peerHandle.replaceFirst("^@", ""));
+        render();
+    }
+
     private View bubble(MailDb.Message m) {
         LinearLayout b = new LinearLayout(this); b.setOrientation(LinearLayout.VERTICAL);
         b.setBackground(Design.ruled(this, m.mine ? Design.ACCENT() : Design.CARD(), Design.INK(), 1));
         b.setPadding(dp(12), dp(9), dp(12), dp(9));
+        // Quoted parent (denormalised snapshot carried with the reply).
+        if (m.replyBody != null && !m.replyBody.isEmpty()) {
+            LinearLayout q = new LinearLayout(this); q.setOrientation(LinearLayout.VERTICAL);
+            int accent = m.mine ? Design.PAPER() : Design.ACCENT();
+            q.setBackground(Design.ruled(this, m.mine ? Design.ACCENT() : Design.PAPER(), accent, 1));
+            q.setPadding(dp(8), dp(5), dp(8), dp(6));
+            q.addView(Design.text(this, "↩ " + (m.replyFrom == null || m.replyFrom.isEmpty() ? "reply" : m.replyFrom), 9.5f, accent, Design.sansBold()));
+            TextView qs = Design.text(this, m.replyBody, 12f, m.mine ? Design.PAPER() : Design.DIM(), Design.sans()); qs.setMaxLines(2); qs.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            q.addView(qs);
+            b.addView(q, lp(0, 0, 0, 6));
+        }
         if (m.body != null && !m.body.isEmpty())
             b.addView(Design.text(this, m.body, 14.5f, m.mine ? Design.PAPER() : Design.INK(), Design.sans()));
         if (m.media != null && !m.media.isEmpty()) {
@@ -554,6 +596,12 @@ public class MainActivity extends AppCompatActivity {
         // Stamp MY Maxima address into every DM so the peer learns how to reply
         // over Maxima — makes the transport two-way after a single message.
         try { String myMx = MaximaLink.myAddresses(this); if (!myMx.isEmpty()) msg.put("mxaddr", myMx); } catch (Exception ignored) {}
+        // Carry the quoted-reply snapshot (if replying). replyFrom is from MY side
+        // ("You" = my message, else the peer's) — flip it for the wire so the peer
+        // reads it from theirs: my message → my handle; their message → "You".
+        final String outReplyBody = replyBody;
+        final String outReplyFrom = replyBody.isEmpty() ? "" : (replyFrom.equals("You") ? myHandle : "You");
+        if (!outReplyBody.isEmpty()) { try { msg.put("replybody", outReplyBody); msg.put("replyfrom", outReplyFrom); } catch (Exception ignored) {} }
         final String msgId = "me-" + System.currentTimeMillis() + "-" + Math.abs((body + threadPeer).hashCode());
         // Stable app-level id so retries of the SAME message dedup on the peer
         // (the transport msgid changes each attempt; this doesn't).
@@ -562,7 +610,9 @@ public class MainActivity extends AppCompatActivity {
         // transport confirms (Maxima ack / on-chain post). Until then the bubble
         // shows "sending…" and the outbox retries it — never a silent loss.
         db.insert(msgId, threadPeer, true, body, mediaRef, mediaMime, ts, true, MailDb.PENDING);
+        if (!outReplyBody.isEmpty()) db.setReply(msgId, replyBody, replyFrom);   // my local copy keeps MY-side labels
         db.upsertContact(threadPeer, ct.handle, ct.avatar, ct.addr, body.isEmpty() ? "📎 media" : body, ts, false);
+        replyBody = ""; replyFrom = "";   // consumed — clear before the re-render
         render();
 
         if (viaChain) { coinSendDm(ct, msg, msgId); return; }
@@ -630,6 +680,11 @@ public class MainActivity extends AppCompatActivity {
             try { if (!myMx.isEmpty()) msg.put("mxaddr", myMx); } catch (Exception ignored) {}
             // Same stable id as the first attempt → the peer dedups the retry.
             try { msg.put("id", m.coinid); } catch (Exception ignored) {}
+            // Preserve the quoted reply on retry (flip MY-side label for the wire).
+            if (m.replyBody != null && !m.replyBody.isEmpty()) {
+                String rf = "You".equals(m.replyFrom) ? myHandle : "You";
+                try { msg.put("replybody", m.replyBody); msg.put("replyfrom", rf); } catch (Exception ignored) {}
+            }
             String xport = SalonStore.get(this, XPORT_PREF + m.peerpk);
             boolean hasMx = ct.mxaddr != null && !ct.mxaddr.isEmpty();
             boolean forceChain = "chain".equals(xport);

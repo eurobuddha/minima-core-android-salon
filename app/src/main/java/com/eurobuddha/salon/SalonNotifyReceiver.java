@@ -100,6 +100,9 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
             String stableId = m.optString("id", "");
             String dedupId = !stableId.isEmpty() ? "id-" + o.fromPublicId + "-" + stableId : msgId;
             boolean isNew = MailDb.get(ctx).insert(dedupId, o.fromPublicId, false, body, media, m.optString("mime", ""), m.optLong("ts", 0), o.valid);
+            // Quoted-reply snapshot travels with the message (v4). Idempotent — safe on a re-delivery.
+            String rBody = m.optString("replybody", "");
+            if (!rBody.isEmpty()) MailDb.get(ctx).setReply(dedupId, rBody, m.optString("replyfrom", ""));
             // Learn the sender's Maxima address from the message itself, so our
             // reply goes back over Maxima — the transport becomes two-way after a
             // single message, no profile-view required. (Runs even on a duplicate,

@@ -22,7 +22,7 @@ final class MailDb extends SQLiteOpenHelper {
         return INSTANCE;
     }
 
-    private MailDb(Context c) { super(c, "salon_mail", null, 3); }
+    private MailDb(Context c) { super(c, "salon_mail", null, 4); }
 
     /** Delivery status of an outgoing message. Inbound messages are always SENT. */
     static final int SENT = 1, PENDING = 0;
@@ -31,7 +31,8 @@ final class MailDb extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE contacts(peerpk TEXT PRIMARY KEY, handle TEXT, avatar TEXT, addr TEXT, "
                 + "mxaddr TEXT, lastbody TEXT, lastts INTEGER, unread INTEGER DEFAULT 0)");
         db.execSQL("CREATE TABLE messages(coinid TEXT PRIMARY KEY, peerpk TEXT, mine INTEGER, body TEXT, "
-                + "media TEXT, mime TEXT, ts INTEGER, valid INTEGER, status INTEGER DEFAULT 1)");
+                + "media TEXT, mime TEXT, ts INTEGER, valid INTEGER, status INTEGER DEFAULT 1, "
+                + "replybody TEXT, replyfrom TEXT)");
         db.execSQL("CREATE INDEX ix_msg_peer ON messages(peerpk, ts)");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int o, int n) {
@@ -41,10 +42,16 @@ final class MailDb extends SQLiteOpenHelper {
         // v3: per-message delivery status. Existing rows default to SENT (1) so
         // history isn't retroactively marked pending.
         if (o < 3) db.execSQL("ALTER TABLE messages ADD COLUMN status INTEGER DEFAULT 1");
+        // v4: quoted-reply snapshot (denormalised: the reply carries a copy of the
+        // parent's text + author, so rendering the quote needs no cross-device lookup).
+        if (o < 4) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN replybody TEXT");
+            db.execSQL("ALTER TABLE messages ADD COLUMN replyfrom TEXT");
+        }
     }
 
     static final class Contact { String peerpk, handle, avatar, addr, mxaddr, lastbody; long lastts; int unread; }
-    static final class Message { String coinid, peerpk, body, media, mime; boolean mine, valid; long ts; int status = SENT; }
+    static final class Message { String coinid, peerpk, body, media, mime, replyBody, replyFrom; boolean mine, valid; long ts; int status = SENT; }
 
     /** Insert a message; returns true if new (dedup by coinid). */
     boolean insert(String coinid, String peerpk, boolean mine, String body, String media, String mime, long ts, boolean valid) {
@@ -74,7 +81,7 @@ final class MailDb extends SQLiteOpenHelper {
     List<Message> pendingOutbox() {
         List<Message> out = new ArrayList<>();
         Cursor cur = getReadableDatabase().rawQuery(
-                "SELECT coinid,peerpk,mine,body,media,mime,ts,valid,status FROM messages "
+                "SELECT coinid,peerpk,mine,body,media,mime,ts,valid,status,replybody,replyfrom FROM messages "
                 + "WHERE mine=1 AND status=" + PENDING + " ORDER BY ts ASC", null);
         while (cur.moveToNext()) out.add(readMsg(cur));
         cur.close();
@@ -128,7 +135,7 @@ final class MailDb extends SQLiteOpenHelper {
     List<Message> messages(String peerpk) {
         List<Message> out = new ArrayList<>();
         Cursor cur = getReadableDatabase().rawQuery(
-                "SELECT coinid,peerpk,mine,body,media,mime,ts,valid,status FROM messages WHERE peerpk=? ORDER BY ts ASC", new String[]{peerpk});
+                "SELECT coinid,peerpk,mine,body,media,mime,ts,valid,status,replybody,replyfrom FROM messages WHERE peerpk=? ORDER BY ts ASC", new String[]{peerpk});
         while (cur.moveToNext()) out.add(readMsg(cur));
         cur.close();
         return out;
@@ -140,7 +147,17 @@ final class MailDb extends SQLiteOpenHelper {
         m.body = cur.getString(3); m.media = cur.getString(4); m.mime = cur.getString(5);
         m.ts = cur.getLong(6); m.valid = cur.getInt(7) == 1;
         m.status = cur.getColumnCount() > 8 ? cur.getInt(8) : SENT;
+        m.replyBody = cur.getColumnCount() > 9 ? cur.getString(9) : null;
+        m.replyFrom = cur.getColumnCount() > 10 ? cur.getString(10) : null;
         return m;
+    }
+
+    /** Attach a quoted-reply snapshot to an already-inserted message. */
+    void setReply(String coinid, String replyBody, String replyFrom) {
+        if (replyBody == null || replyBody.isEmpty()) return;
+        ContentValues v = new ContentValues();
+        v.put("replybody", replyBody); v.put("replyfrom", replyFrom == null ? "" : replyFrom);
+        getWritableDatabase().update("messages", v, "coinid=?", new String[]{coinid});
     }
 
     /** Record (or clear, with "") the peer's Maxima addresses from their profile. */

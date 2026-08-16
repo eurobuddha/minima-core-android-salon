@@ -30,6 +30,7 @@ final class MinimaMail {
         final String coinid, fromPublicId, fromHandle, fromAddr, body, mediaRef, mediaMime;
         final long ts; final boolean valid;
         String stableId = "";   // sender's app-level id from the payload, for cross-transport dedup
+        String replyBody = "", replyFrom = "";   // quoted-reply snapshot (v4)
         Msg(String coinid, String fromPublicId, String fromHandle, String fromAddr, String body, String mediaRef, String mediaMime, long ts, boolean valid) {
             this.coinid = coinid; this.fromPublicId = fromPublicId; this.fromHandle = fromHandle; this.fromAddr = fromAddr;
             this.body = body; this.mediaRef = mediaRef; this.mediaMime = mediaMime; this.ts = ts; this.valid = valid;
@@ -75,6 +76,7 @@ final class MinimaMail {
                         Msg msg = new Msg(cid, o.fromPublicId, m.optString("from", "someone"), m.optString("addr", ""),
                                 m.optString("body", ""), m.optString("media", ""), m.optString("mime", ""), m.optLong("ts", 0), o.valid);
                         msg.stableId = m.optString("id", "");
+                        msg.replyBody = m.optString("replybody", ""); msg.replyFrom = m.optString("replyfrom", "");
                         out.add(msg);
                     } catch (Exception ignored) {}
                 }
