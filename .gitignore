@@ -11,3 +11,6 @@ captures/
 
 # graphify per-repo output (rebuilt by the post-commit hook)
 graphify-out/
+
+# Built APKs live in the minima-core-apks catalog + GitHub Releases
+*.apk
