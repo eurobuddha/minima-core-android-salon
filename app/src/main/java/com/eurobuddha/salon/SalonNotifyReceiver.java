@@ -47,6 +47,9 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
         try {
             JSONObject j = new JSONObject(message);
             String event = j.optString("event", "");
+            // Free background tick: the node broadcasts every block (~50s) even while our
+            // process is dead. Ride it to keep the Discovery beacon alive with the app closed.
+            if (event.equals("NEWBLOCK")) { maybeEnqueueKeepAlive(ctx); return; }
             if (!event.equals("NEWCOIN") && !event.equals("NOTIFYCOIN")) return;
             JSONObject data = j.optJSONObject("data"); if (data == null) return;
             JSONObject coin = data.optJSONObject("coin"); if (coin == null) coin = data;
@@ -64,6 +67,20 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
                 notify(ctx, "💰 Tip received", "@" + from.replaceFirst("^@", "") + " tipped you " + amt + " " + tok);
             }
         } catch (Exception ignored) {}
+    }
+
+    /** Enqueue one bounded keep-alive pass when due (>=4h since the last pass, foreground or
+     *  background). Two prefs reads per block when idle — trivial. KEEP dedups re-enqueues;
+     *  the Worker re-checks every gate itself, so races here are harmless. */
+    private static void maybeEnqueueKeepAlive(Context ctx) {
+        try {
+            if (MainActivity.FOREGROUND) return;   // the Activity's own tick is driving
+            if (!SalonKeepAliveWorker.bgEnabled(ctx) || !SalonStore.hasIdentity(ctx)) return;
+            if (!SalonKeepAliveWorker.due(ctx)) return;
+            androidx.work.WorkManager.getInstance(ctx).enqueueUniqueWork(
+                    SalonKeepAliveWorker.WORK_ONESHOT, androidx.work.ExistingWorkPolicy.KEEP,
+                    new androidx.work.OneTimeWorkRequest.Builder(SalonKeepAliveWorker.class).build());
+        } catch (Throwable ignored) {}
     }
 
     private void handleDm(Context ctx, JSONObject coin, String s99) {

@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.salon"
         minSdk 28
         targetSdk 35
-        versionCode 1130
-        versionName "0.11.30"
+        versionCode 1131
+        versionName "0.11.31"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -81,6 +81,8 @@ dependencies {
     // QR codes (tip address / profile URL for in-person scanning) — pure-Java, no Android deps.
     implementation 'com.google.zxing:core:3.5.3'
 
+    // background beacon keep-alive (SalonKeepAliveWorker) — same version as openly
+    implementation 'androidx.work:work-runtime:2.9.1'
     // pull-to-refresh on Feed / Discover
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     // windowed/recycled list for the profile's Posts section (bounded memory as it grows)

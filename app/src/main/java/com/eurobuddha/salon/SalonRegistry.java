@@ -82,6 +82,12 @@ final class SalonRegistry {
      * and capped, so many nodes don't all re-post the same entries.
      */
     static void keepAlive(NodeApi node, String myTokenid, String myUrl, String myHandle, JSONArray follows, Done cb) {
+        keepAlive(node, myTokenid, myUrl, myHandle, follows, MAX_REANNOUNCE_PER_RUN, cb);
+    }
+
+    /** maxPosts caps the sends per pass — the background worker uses a smaller cap (each send
+     *  can grind PoW for up to 180s and the pass must fit WorkManager's 10-minute budget). */
+    static void keepAlive(NodeApi node, String myTokenid, String myUrl, String myHandle, JSONArray follows, int maxPosts, Done cb) {
         scanEntries(node, FRESH_DEPTH, freshList -> {
             final Set<String> fresh = new HashSet<>();
             for (Entry e : freshList) fresh.add(e.tokenid);
@@ -112,7 +118,7 @@ final class SalonRegistry {
 
                 List<Entry> queue = new ArrayList<>();
                 queue.addAll(mine); queue.addAll(fol); queue.addAll(others);
-                if (queue.size() > MAX_REANNOUNCE_PER_RUN) queue = new ArrayList<>(queue.subList(0, MAX_REANNOUNCE_PER_RUN));
+                if (queue.size() > maxPosts) queue = new ArrayList<>(queue.subList(0, maxPosts));
                 reannounceNext(node, queue, 0, cb);
             });
         });
@@ -122,8 +128,15 @@ final class SalonRegistry {
     private static void reannounceNext(NodeApi node, List<Entry> queue, int i, Done cb) {
         if (i >= queue.size()) { if (cb != null) cb.done(i); return; }
         Entry e = queue.get(i);
+        // Add BEFORE posting (guards a concurrent pass — the foreground Activity and the
+        // background worker share this set), but per the pandapools rule only a SUCCESSFUL
+        // post stays marked: a failed send re-opens the entry so the next pass retries it,
+        // instead of locking the beacon out for the rest of the process lifetime.
         ANNOUNCED.add(e.tokenid);
-        announce(node, e.tokenid, e.url, e.handle, (ok, msg) -> reannounceNext(node, queue, i + 1, cb));
+        announce(node, e.tokenid, e.url, e.handle, (ok, msg) -> {
+            if (!ok) ANNOUNCED.remove(e.tokenid);
+            reannounceNext(node, queue, i + 1, cb);
+        });
     }
 
     /** Read a depth-bounded window at the sentinel and parse it to deduped entries. */

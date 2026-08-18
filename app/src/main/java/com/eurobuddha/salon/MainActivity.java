@@ -106,6 +106,9 @@ public class MainActivity extends AppCompatActivity {
     private TextView nodeChip;
     private boolean nodeUp = false;
     private boolean wasNodeUp = false;      // to re-render node-gated screens on connect
+    /** Single-driver invariant for the beacon keep-alive: while the Activity is resumed its own
+     *  tick drives keepAlive and SalonKeepAliveWorker stays idle (openly's FOREGROUND pattern). */
+    public static volatile boolean FOREGROUND = false;
     private String expandedNft = null;      // tokenid of the showcase holding currently expanded
     // Per-tokenid caches so a re-render (expand/collapse, NEWBLOCK) does NOT re-hammer
     // the node: each holding's verify outcome + live edition icon is resolved once per
@@ -951,12 +954,28 @@ public class MainActivity extends AppCompatActivity {
         long now = System.currentTimeMillis();
         if (now - lastReannounceMs < REANN_THROTTLE_MS) return;
         lastReannounceMs = now;
+        SalonKeepAliveWorker.markPass(this);   // foreground passes reset the shared background clock
         SalonRegistry.keepAlive(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"),
                 SalonStore.get(this, "handle"), SalonStore.follows(this), n -> {});
     }
 
+    /** Periodic safety net behind the NEWBLOCK-triggered one-shot (SalonNotifyReceiver): if the
+     *  node's block broadcasts ever go quiet, this still runs a due-gated pass every ~6h. KEEP so
+     *  re-opening the app never resets the schedule; WorkManager persists it across reboots. */
+    private void scheduleKeepAliveFallback() {
+        if (!SalonKeepAliveWorker.bgEnabled(this) || !SalonStore.hasIdentity(this)) return;
+        try {
+            androidx.work.PeriodicWorkRequest req = new androidx.work.PeriodicWorkRequest.Builder(
+                    SalonKeepAliveWorker.class, 6, java.util.concurrent.TimeUnit.HOURS).build();
+            androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                    SalonKeepAliveWorker.WORK_PERIODIC, androidx.work.ExistingPeriodicWorkPolicy.KEEP, req);
+        } catch (Throwable t) { android.util.Log.w(SalonKeepAliveWorker.TAG, "fallback schedule failed", t); }
+    }
+
     @Override protected void onResume() {
         super.onResume();
+        FOREGROUND = true;
+        scheduleKeepAliveFallback();   // no-op without identity; covers create/adopt since last open
         reannHandler.removeCallbacks(reannTick);
         reannHandler.post(reannTick);   // renew now (if faded) + reschedule while foreground
         if (node != null && !node.isEnabled()) startPairingRetry();   // resume pairing retries only if still unpaired
@@ -980,7 +999,8 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onPause() {
         super.onPause();
-        reannHandler.removeCallbacks(reannTick);   // no background beaconing — foreground only
+        FOREGROUND = false;
+        reannHandler.removeCallbacks(reannTick);   // the Activity's tick stops; SalonKeepAliveWorker takes over while closed
         pairHandler.removeCallbacks(pairTick);     // stop the 5s SDK-rebuild loop while backgrounded (restarted on resume if still unpaired)
         sInbox = null; sMaximaReady = null;   // don't hold the activity while backgrounded
     }
@@ -2797,6 +2817,21 @@ public class MainActivity extends AppCompatActivity {
             if (!tipaddr.isEmpty()) { copyRow(idc, "Tip address", tipaddr);
                 idc.addView(btn("Show tip-address QR", false, () -> showQr("Tip @" + SalonStore.get(this, "handle"), tipaddr)), lph(44, 0, 4, 0, 0)); }
             idc.addView(btn("Re-publish to the Salon", false, () -> publishSalon(null)), lph(44, 0, 8, 0, 0));
+            boolean bg = SalonKeepAliveWorker.bgEnabled(this);
+            idc.addView(Design.note(this, "Keep on the square while closed: re-posts your beacon every few hours in the background via the Minima node on this phone, so you never drop off Discovery."), lp(0, 8, 0, 4));
+            idc.addView(btn("Background publish: " + (bg ? "ON" : "OFF"), false, () -> {
+                if (SalonKeepAliveWorker.bgEnabled(this)) {
+                    SalonStore.put(this, "keepalivebg", "off");
+                    try {
+                        androidx.work.WorkManager.getInstance(this).cancelUniqueWork(SalonKeepAliveWorker.WORK_ONESHOT);
+                        androidx.work.WorkManager.getInstance(this).cancelUniqueWork(SalonKeepAliveWorker.WORK_PERIODIC);
+                    } catch (Throwable ignored) {}
+                } else {
+                    SalonStore.put(this, "keepalivebg", "");
+                    scheduleKeepAliveFallback();
+                }
+                render();
+            }), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Restore page from hosting", false, () -> hydrateFromHosted(SalonStore.get(this, "profileUrl"), true)), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Back up messaging key", false, this::backupMsgKey), lph(44, 0, 8, 0, 0));
             idc.addView(btn("Restore messaging key", false, this::restoreMsgKey), lph(44, 0, 8, 0, 0));
