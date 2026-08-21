@@ -38,9 +38,14 @@ final class SalonRegistry {
     private static final int FRESH_DEPTH = 1000;  // still-discoverable window; older = faded
     private static final int MAX_REANNOUNCE_PER_RUN = 6;
 
-    // Guards against double-posting an entry within one app session; a new process
-    // starts empty, and only faded entries are ever added.
-    private static final Set<String> ANNOUNCED = Collections.synchronizedSet(new HashSet<>());
+    // Guards against double-posting an entry while a re-post is still confirming — tokenid →
+    // post time. A new process starts empty. Entries EXPIRE after a TTL: an "ok" send that
+    // never confirms (sick node — S23, 2026-08-19..21, whose long-lived process skipped its
+    // own faded beacon for 2 days) must become retryable, not poison the process lifetime.
+    private static final Map<String, Long> ANNOUNCED = new java.util.concurrent.ConcurrentHashMap<>();
+    /** A confirmed beacon shows in the fresh scan within a couple of blocks; if it hasn't
+     *  after this long, the post evaporated — retry on the next pass. */
+    private static final long ANNOUNCE_UNCONFIRMED_TTL_MS = 20 * 60 * 1000L;
 
     private SalonRegistry() {}
 
@@ -115,7 +120,8 @@ final class SalonRegistry {
                 List<Entry> mine = new ArrayList<>(), fol = new ArrayList<>(), others = new ArrayList<>();
                 for (Entry e : byId.values()) {
                     if (fresh.contains(e.tokenid)) { ANNOUNCED.remove(e.tokenid); continue; }   // live again → RE-ARM so a later re-fade re-announces (else the beacon goes dark forever). Mirrors pandapools ReAnnouncer.
-                    if (ANNOUNCED.contains(e.tokenid)) continue;   // already re-posted, beacon not yet confirmed back into the window
+                    Long postedAt = ANNOUNCED.get(e.tokenid);
+                    if (postedAt != null && System.currentTimeMillis() - postedAt < ANNOUNCE_UNCONFIRMED_TTL_MS) continue;   // re-post still confirming
                     if (e.tokenid.equals(myTokenid)) mine.add(e);
                     else if (followIds.contains(e.tokenid)) fol.add(e);
                     else others.add(e);
@@ -137,11 +143,11 @@ final class SalonRegistry {
     private static void reannounceNext(NodeApi node, List<Entry> queue, int i, Done cb) {
         if (i >= queue.size()) { if (cb != null) cb.done(i); return; }
         Entry e = queue.get(i);
-        // Add BEFORE posting (guards a concurrent pass — the foreground Activity and the
-        // background worker share this set), but per the pandapools rule only a SUCCESSFUL
+        // Mark BEFORE posting (guards a concurrent pass — the foreground Activity and the
+        // background worker share this map), but per the pandapools rule only a SUCCESSFUL
         // post stays marked: a failed send re-opens the entry so the next pass retries it,
         // instead of locking the beacon out for the rest of the process lifetime.
-        ANNOUNCED.add(e.tokenid);
+        ANNOUNCED.put(e.tokenid, System.currentTimeMillis());
         announce(node, e.tokenid, e.url, e.handle, (ok, msg) -> {
             if (!ok) ANNOUNCED.remove(e.tokenid);
             reannounceNext(node, queue, i + 1, cb);
