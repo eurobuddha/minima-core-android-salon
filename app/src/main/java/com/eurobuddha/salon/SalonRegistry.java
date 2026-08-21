@@ -62,10 +62,17 @@ final class SalonRegistry {
         String state = "{\"0\":\"" + tokenid + "\",\"1\":\"" + hex(url) + "\",\"2\":\"" + hex(handle) + "\"}";
         node.cmd("send address:" + SALON_ADDRESS + " amount:" + DUST + " state:" + state, new NodeApi.Cb() {
             @Override public void onResult(JSONObject json) {
-                if (json.optBoolean("status", false) || json.optBoolean("pending", false)) cb.done(true, "Published to the Salon.");
+                boolean ok = json.optBoolean("status", false) || json.optBoolean("pending", false);
+                // Always log the node's verdict — a silent send failure hid a 2-day Discovery
+                // outage (S23, 2026-08-21); the callers mostly discard the message.
+                android.util.Log.d("SalonKeepAlive", "announce " + tokenid + " -> " + (ok ? "ok" : "FAIL: " + json.optString("error", json.toString())));
+                if (ok) cb.done(true, "Published to the Salon.");
                 else cb.done(false, json.optString("error", "publish failed"));
             }
-            @Override public void onError(String m) { cb.done(false, m); }
+            @Override public void onError(String m) {
+                android.util.Log.d("SalonKeepAlive", "announce " + tokenid + " -> ERROR: " + m);
+                cb.done(false, m);
+            }
         });
     }
 
@@ -119,6 +126,8 @@ final class SalonRegistry {
                 List<Entry> queue = new ArrayList<>();
                 queue.addAll(mine); queue.addAll(fol); queue.addAll(others);
                 if (queue.size() > maxPosts) queue = new ArrayList<>(queue.subList(0, maxPosts));
+                android.util.Log.d("SalonKeepAlive", "keepAlive fresh=" + fresh.size() + " candidates=" + candidates.size()
+                        + " queue=" + queue.size() + " me=" + myTokenid);
                 reannounceNext(node, queue, 0, cb);
             });
         });

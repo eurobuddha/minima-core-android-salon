@@ -65,16 +65,17 @@ public class SalonKeepAliveWorker extends Worker {
 
     @NonNull @Override public Result doWork() {
         Context ctx = getApplicationContext();
-        if (MainActivity.FOREGROUND) return Result.success();   // the Activity is driving; stay idle
-        if (!bgEnabled(ctx) || !SalonStore.hasIdentity(ctx)) return Result.success();
-        if (!due(ctx)) return Result.success();                 // one-shot + periodic converge on the same clock
+        if (MainActivity.FOREGROUND) { android.util.Log.d(TAG, "skip: foreground"); return Result.success(); }
+        if (!bgEnabled(ctx) || !SalonStore.hasIdentity(ctx)) { android.util.Log.d(TAG, "skip: disabled or no identity"); return Result.success(); }
+        if (!due(ctx)) { android.util.Log.d(TAG, "skip: not due (last pass " + ((System.currentTimeMillis() - lastPass(ctx)) / 60000) + "m ago)"); return Result.success(); }
         NodeApi node = new NodeApi(ctx, enabled -> {});
         CountDownLatch done = new CountDownLatch(1);
         try {
             SalonRegistry.keepAlive(node, SalonStore.get(ctx, "tokenid"), SalonStore.get(ctx, "profileUrl"),
                     SalonStore.get(ctx, "handle"), SalonStore.follows(ctx), MAX_BG_POSTS,
                     n -> { android.util.Log.d(TAG, "pass done, posted " + n); done.countDown(); });
-            done.await(LATCH_SECONDS, TimeUnit.SECONDS);
+            if (!done.await(LATCH_SECONDS, TimeUnit.SECONDS))
+                android.util.Log.w(TAG, "pass timed out after " + LATCH_SECONDS + "s (node silent?)");
         } catch (Throwable t) {
             android.util.Log.w(TAG, "pass failed (contained)", t);
         } finally {
