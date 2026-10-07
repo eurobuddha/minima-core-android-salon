@@ -3,7 +3,7 @@
 -dontobfuscate
 
 # Native Minima API classes are delivered by the bundled AAR.
--keep class org.minimarex.minimaapi.** { *; }
+-keep class com.eurobuddha.minimaapi.** { *; }
 
 # JNA + lazysodium: heavy reflection + native binding — keep everything.
 -keep class com.sun.jna.** { *; }

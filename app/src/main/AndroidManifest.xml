@@ -3,7 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <queries>
-        <package android:name="org.minimarex.minimacore" />
+        <package android:name="com.eurobuddha.minimacore" />
         <!-- the Maxima transport (DMs over the decentralised comms layer) -->
         <package android:name="com.eurobuddha.maxima.app" />
     </queries>
@@ -39,7 +39,7 @@
         <!-- Closed-app alerts: the core pushes a targeted NOTIFY broadcast on coin arrival. -->
         <receiver android:name=".SalonNotifyReceiver" android:exported="true">
             <intent-filter>
-                <action android:name="org.minimarex.minimacore.NOTIFY" />
+                <action android:name="com.eurobuddha.minimacore.NOTIFY" />
             </intent-filter>
         </receiver>
         <!-- The Maxima transport talks back here (replies, inbound DMs, events).

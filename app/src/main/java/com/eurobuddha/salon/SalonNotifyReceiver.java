@@ -13,14 +13,14 @@ import androidx.core.app.NotificationManagerCompat;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
-import org.minimarex.minimaapi.MinimaAPI;
-import org.minimarex.minimaapi.MinimaAPIMessages;
+import com.eurobuddha.minimaapi.MinimaAPI;
+import com.eurobuddha.minimaapi.MinimaAPIMessages;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 /**
- * Closed-app alerts. The Minima core pushes a targeted {@code org.minimarex.minimacore.NOTIFY}
+ * Closed-app alerts. The Minima core pushes a targeted {@code com.eurobuddha.minimacore.NOTIFY}
  * broadcast to our package whenever a coin lands in our wallet (NEWCOIN) or at a coinnotify
  * address (NOTIFYCOIN) — even when Salon is dead/backgrounded. We classify the coin: a DM
  * (state[99], decrypted in-app) or a tip (state[1]=handle), store the DM, and post a heads-up
