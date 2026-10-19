@@ -29,3 +29,17 @@ in this port. Broader identity/recovery/hosting parity remains outstanding.
 Actual APK package/version and family release certificate verified.
 No install/publication. Candidate: _artifacts/salon-0.11.36.apk
 SHA256: 20ef1fdd5ad70c49eb34820370f20ddce6971d7a433345b219ea174da40f317c
+
+Salon0.11.37/code1137 — retry failed identity adoption
+Reuses integrated IdentityBalance validation plus request/owner guards. Automatic
+lookup is complete only after a valid balance response; failures remain retryable
+on reconnect/resume, one request at a time. Late replies cannot replace a changed
+account or consume a newer request. Serialized identity metadata is normalized.
+Standalone keeps its existing adoption/storage/hydration entrypoint. The integrated
+atomic save, full claim lifecycle and hosted restoration remain separate open ports;
+this checkpoint does not claim complete identity/hosting parity.
+Four adoption tests and five canonical IdentityBalance tests added.27 tests pass,
+zero failures/errors/skips. Signed release build/lint pass (0 errors107 warnings).
+Reviewed changed callback ownership, parser, callers, version and tests. Candidate
+_artifacts/salon-0.11.37.apk and SHA256 sidecar verified against package/version and
+family signing certificate. All node/hosting operations mocked; no install/publish.

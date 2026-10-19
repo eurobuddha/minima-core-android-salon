@@ -118,6 +118,7 @@ public class MainActivity extends AppCompatActivity {
     private final java.util.Map<String, String> mLiveIcon = new java.util.concurrent.ConcurrentHashMap<>();
     private String pubkey = "";
     private boolean adoptChecked = false;
+    private Object identityAdoption;
     private boolean reannouncedThisSession = false;
 
     // Minima's provably-unspendable "RETURN FALSE" graveyard — burning a coin
@@ -241,13 +242,7 @@ public class MainActivity extends AppCompatActivity {
         if (nodeChip != null) nodeChip.setText(nodeUp ? "connected" : "no node");
         if (!nodeUp) startPairingRetry();   // keep re-registering after a disconnect
         if (nodeUp && pubkey.isEmpty()) fetchPubkey();
-        if (nodeUp && !adoptChecked && !claiming && !SalonStore.hasIdentity(this)) {
-            adoptChecked = true;
-            node.cmd("balance", new NodeApi.Cb() {
-                @Override public void onResult(JSONObject j) { JSONObject t = findAnySalonToken(j); if (t != null) runOnUiThread(() -> adoptFromToken(t)); }
-                @Override public void onError(String m) {}
-            });
-        }
+        checkIdentityAdoption();
         // One-time-per-session setup (relay TTL, mail key, first inbox scan).
         if (nodeUp && !reannouncedThisSession && SalonStore.hasIdentity(this)) {
             reannouncedThisSession = true;
@@ -974,6 +969,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        checkIdentityAdoption();
         FOREGROUND = true;
         scheduleKeepAliveFallback();   // no-op without identity; covers create/adopt since last open
         reannHandler.removeCallbacks(reannTick);
@@ -2696,6 +2692,31 @@ public class MainActivity extends AppCompatActivity {
     }
     private void claimFailed() { claiming = false; setClaimEnabled(true); }
     private void setClaimEnabled(boolean on) { if (claimBtn != null) { claimBtn.setEnabled(on); claimBtn.setAlpha(on ? 1f : 0.4f); } }
+
+    /** Reuse the integrated request/owner guards; failed reads remain retryable. */
+    private void checkIdentityAdoption() {
+        if(!nodeUp || node==null || adoptChecked || identityAdoption!=null || claiming
+                || SalonStore.hasIdentity(this) || isFinishing() || isDestroyed()) return;
+        final String snapshot=SalonStore.me(this).toString();
+        final Object request=new Object(); identityAdoption=request;
+        final NodeApi requestedNode=node;
+        NodeApi.Cb result=new NodeApi.Cb() {
+            public void onResult(JSONObject reply) { runOnUiThread(()->{
+                if(identityAdoption!=request) return; identityAdoption=null;
+                if(isFinishing() || isDestroyed() || node!=requestedNode || !nodeUp || claiming
+                        || !snapshot.equals(SalonStore.me(MainActivity.this).toString())) return;
+                try {
+                    JSONObject row=IdentityBalance.find(reply,null);
+                    if(row==null) { adoptChecked=true; return; }
+                    if(new java.math.BigInteger(row.getString("tokenid").substring(2),16).signum()==0) return;
+                    adoptFromToken(row);
+                    adoptChecked=SalonStore.hasIdentity(MainActivity.this);
+                } catch(Exception unavailable) { /* Keep failed lookups retryable. */ }
+            }); }
+            public void onError(String ignored) { runOnUiThread(()->{if(identityAdoption==request)identityAdoption=null;}); }
+        };
+        try { requestedNode.cmd("balance",result); } catch(RuntimeException unavailable) {result.onError("");}
+    }
 
     private JSONObject findAnySalonToken(JSONObject j) { return findSalonEntry(j, null); }
     private String findSalonToken(JSONObject j, String handle) { JSONObject t = findSalonEntry(j, handle); return t == null ? "" : t.optString("tokenid"); }
