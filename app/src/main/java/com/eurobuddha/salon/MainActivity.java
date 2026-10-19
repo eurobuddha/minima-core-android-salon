@@ -241,6 +241,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void onNode() {
         if (nodeChip != null) nodeChip.setText(nodeUp ? "connected" : "no node");
+        if(nodeUp && screen==Screen.EDIT) resumePublication();
         if (!nodeUp) startPairingRetry();   // keep re-registering after a disconnect
         if (nodeUp && pubkey.isEmpty()) fetchPubkey();
         checkIdentityAdoption();
@@ -1032,6 +1033,7 @@ public class MainActivity extends AppCompatActivity {
         reannHandler.removeCallbacks(reannTick);
         io.shutdownNow();
         stopAudio();
+        if(publicationCheck!=null) publicationCheck.stop();
         KeetsLink.release(node);
         if (node != null) node.onDestroy();   // release the MinimaAPI receiver + cancel pending IPC timeouts
     }
@@ -1084,6 +1086,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void go(Screen s) {
         if (screen == Screen.EDIT && s != Screen.EDIT) commitEditFields();   // preserve the draft when leaving Edit
+        if(s==Screen.EDIT && screen!=Screen.EDIT) publishStage=null;
         screen = s; render();
     }
 
@@ -1222,14 +1225,17 @@ public class MainActivity extends AppCompatActivity {
     /** Re-host profile.json (+ the public web renderer). Refreshes each holding's
      *  published editions FIRST so viewers get the full StateNFT collection. */
     private void hostProfile(TextView status, Runnable done) {
+        if(pendingPublication()) { publishSalon(status); return; }
+        if(publishPreparing) return;
         if (deviceMediaBusy || deviceProfileBusy) { if(status!=null) status.setText("A publication or media upload is already in progress."); return; }
+        publishPreparing=true; updatePublishButton();
         refreshEditionsThen(() -> doHostProfile(status, done));
     }
 
     private void doHostProfile(TextView status, Runnable done) {
-        if (deviceMediaBusy || deviceProfileBusy) return;
+        if (deviceMediaBusy || deviceProfileBusy) { publishPreparing=false;updatePublishButton();return; }
         Hosting.Profile def = HostingStore.getDefault(this);
-        if (def == null) { if (status != null) status.setText("Set hosting first."); return; }
+        if (def == null) { publishPreparing=false;updatePublishButton();if (status != null) status.setText("Set hosting first."); return; }
         String handle = SalonStore.get(this, "handle");
         if (status != null) status.setText("Publishing your page…");
         JSONObject profile = buildProfileJson();
@@ -1254,7 +1260,7 @@ public class MainActivity extends AppCompatActivity {
                     if (done != null) done.run();
                 });
             } catch (Exception e) { runOnUiThread(() -> { if (status != null) status.setText("Publish failed: " + e.getMessage()); }); }
-            finally { runOnUiThread(() -> deviceProfileBusy=false); }
+            finally { runOnUiThread(() -> { deviceProfileBusy=false;publishPreparing=false;updatePublishButton(); }); }
         });
     }
 
@@ -2146,13 +2152,14 @@ public class MainActivity extends AppCompatActivity {
         body.addView(nftCard, lp(0, 0, 0, 12));
 
         profStatus = Design.note(this, ""); body.addView(profStatus, lp(0, 4, 0, 0));
-        body.addView(btn("Save & publish", true, () -> {
+        body.addView(publishAction(() -> {
             SalonStore.put(this, "name", text(name)); SalonStore.put(this, "bio", text(bio));
             SalonStore.put(this, "about", text(about));
             SalonStore.put(this, "avatar", text(edAvatar)); SalonStore.put(this, "banner", text(edBanner));
             SalonStore.put(this, "webvalidate", text(edWebvalidate));
-            hostProfile(profStatus, () -> { publishSalon(profStatus); toast("Page saved & published."); go(Screen.HOME); });
+            hostProfile(profStatus, () -> publishSalon(profStatus));
         }), lph(52, 0, 8, 0, 0));
+        resumePublication();
     }
 
     private void addLinkDialog() {
@@ -2352,8 +2359,8 @@ public class MainActivity extends AppCompatActivity {
     private void openImage(String url) {
         if (url == null || url.isEmpty()) return;
         Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
-        ImageView iv = new ImageView(this); iv.setBackgroundColor(0xFF000000); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        ImageLoader.loadFull(this, url, iv); iv.setOnClickListener(v -> d.dismiss());
+        ZoomImageView iv = new ZoomImageView(this); iv.setBackgroundColor(0xFF000000);
+        ImageLoader.loadFull(this, url, iv); iv.setTapListener(d::dismiss);
         d.setContentView(iv); d.show();
     }
 
@@ -2463,7 +2470,7 @@ public class MainActivity extends AppCompatActivity {
         final int[] idx = { Math.max(0, Math.min(start, items.size() - 1)) };
         final Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
         FrameLayout root = new FrameLayout(this); root.setBackgroundColor(0xFF000000);
-        final ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        final ZoomImageView img = new ZoomImageView(this);
         root.addView(img, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout top = new LinearLayout(this); top.setOrientation(LinearLayout.HORIZONTAL); top.setGravity(Gravity.CENTER_VERTICAL); top.setPadding(dp(16), dp(26), dp(16), dp(10));
@@ -2488,17 +2495,10 @@ public class MainActivity extends AppCompatActivity {
         prev.setOnClickListener(v -> { if (idx[0] > 0) { idx[0]--; bind[0].run(); } });
         next.setOnClickListener(v -> { if (idx[0] < items.size() - 1) { idx[0]++; bind[0].run(); } });
 
-        final android.view.GestureDetector gd = new android.view.GestureDetector(this, new android.view.GestureDetector.SimpleOnGestureListener() {
-            @Override public boolean onFling(android.view.MotionEvent e1, android.view.MotionEvent e2, float vx, float vy) {
-                if (e1 == null || e2 == null) return false; float dx = e2.getX() - e1.getX();
-                if (Math.abs(dx) > dp(56) && Math.abs(dx) > Math.abs(e2.getY() - e1.getY())) {
-                    if (dx < 0) { if (idx[0] < items.size() - 1) { idx[0]++; bind[0].run(); } } else { if (idx[0] > 0) { idx[0]--; bind[0].run(); } }
-                    return true;
-                }
-                return false;
-            }
+        img.setSwipeListener(nextImage -> {
+            int target=idx[0]+(nextImage?1:-1);
+            if(target>=0 && target<items.size()) { idx[0]=target;bind[0].run(); }
         });
-        img.setClickable(true); img.setOnTouchListener((v, ev) -> gd.onTouchEvent(ev));
         bind[0].run();
         d.setContentView(root); d.show();
     }
@@ -2805,10 +2805,96 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private SalonPublication publicationCheck;
+    private android.widget.ProgressBar publishSpinner;
+    private TextView publishButton;
+    private boolean publishPreparing;
+    private SalonPublication.Stage publishStage;
+    private String publishOwner = "";
+
+    private boolean pendingPublication() {
+        return SalonPublication.pending(this, SalonStore.get(this,"tokenid"));
+    }
+    private void showPublishState(SalonPublication.Stage stage) {
+        publishStage=stage;
+        CharSequence message=publishMessage(stage);
+        if (screen == Screen.EDIT && profStatus != null) profStatus.setText(message);
+        else if (stage==SalonPublication.Stage.CONFIRMED || stage==SalonPublication.Stage.UNKNOWN) toast(message.toString());
+        updatePublishButton();
+    }
+    private void updatePublishButton() {
+        if (publishButton==null) return;
+        boolean busy=publishPreparing || (publicationCheck!=null && publicationCheck.active());
+        boolean pending=pendingPublication();
+        publishButton.setEnabled(!busy);
+        publishButton.setClickable(!busy);
+        if (publishSpinner!=null) publishSpinner.setVisibility(busy ? View.VISIBLE : View.GONE);
+        CharSequence label=busy ? (publishPreparing ? "Publishing…" : "Confirming…")
+                : pending ? "Check status" : publishStage==SalonPublication.Stage.CONFIRMED ? "Published · View page" : "Save & publish";
+        publishButton.setText(label);
+    }
+    private View publishAction(Runnable save) {
+        FrameLayout frame=new FrameLayout(this);
+        publishButton=btn("Save & publish",true,()->{
+            if(publishPreparing || (publicationCheck!=null && publicationCheck.active())) return;
+            if(pendingPublication()) { publishSalon(profStatus); return; }
+            if(publishStage==SalonPublication.Stage.CONFIRMED) { go(Screen.HOME); return; }
+            save.run();
+        });
+        publishButton.setPadding(dp(42),dp(12),dp(42),dp(12));
+        frame.addView(publishButton,new FrameLayout.LayoutParams(-1,-2));
+        publishSpinner=new android.widget.ProgressBar(this);
+        publishSpinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Design.WHITE()));
+        FrameLayout.LayoutParams indicator=new FrameLayout.LayoutParams(dp(20),dp(20),Gravity.START|Gravity.CENTER_VERTICAL);
+        indicator.leftMargin=dp(14);frame.addView(publishSpinner,indicator);
+        updatePublishButton();
+        return frame;
+    }
+    private void resumePublication() {
+        if(pendingPublication() && nodeUp && (publicationCheck==null || !publicationCheck.active())) publishSalon(profStatus);
+        else updatePublishButton();
+    }
     private void publishSalon(TextView status) {
-        if (!nodeUp || !SalonStore.hasIdentity(this)) { if (status != null) status.setText("Need the node to publish."); return; }
-        SalonRegistry.announce(node, SalonStore.get(this, "tokenid"), SalonStore.get(this, "profileUrl"), SalonStore.get(this, "handle"),
-                (ok, msg) -> runOnUiThread(() -> { if (status != null) status.setText(msg); else toast(msg); }));
+        if(publicationCheck!=null && publicationCheck.active()) return;
+        if(!nodeUp || node==null || !SalonStore.hasIdentity(this) || SalonStore.get(this,"profileUrl").isEmpty()) {
+            if(status!=null) { CharSequence message="Connect the node to check publication."; status.setText(message); }
+            return;
+        }
+        final String token=SalonStore.get(this,"tokenid");
+        final String owner=SalonStore.get(this,"msgpk");
+        final String profileUrl=SalonStore.get(this,"profileUrl");
+        final String url=pendingPublication() ? SalonPublication.pendingUrl(this,token) : profileUrl;
+        final int publicationEpoch=renderEpoch;
+        final NodeApi requestedNode=node;
+        if(publicationCheck!=null) publicationCheck.stop();
+        publishOwner=token;
+        publicationCheck=new SalonPublication(this,node,token,url,SalonStore.get(this,"handle"),
+                ()->!isFinishing() && !isDestroyed() && node==requestedNode && nodeUp
+                        && token.equals(SalonStore.get(this,"tokenid")) && owner.equals(SalonStore.get(this,"msgpk"))
+                        && profileUrl.equals(SalonStore.get(this,"profileUrl")),
+                stage->{
+                    showPublishState(stage);
+                    if(stage==SalonPublication.Stage.CONFIRMED && screen==Screen.EDIT && publicationEpoch==renderEpoch) {
+                        mProfileCache.clear(); mRegistryCache=null;
+                        go(Screen.DISCOVER);
+                        scroll.post(()->scroll.scrollTo(0,0));
+                        toast(publishMessage(stage).toString());
+                    }
+                    if(status!=null && status!=profStatus) { CharSequence message=publishMessage(stage); status.setText(message); }
+                });
+        publicationCheck.start(true);
+    }
+    private CharSequence publishMessage(SalonPublication.Stage stage) {
+        switch(stage) {
+            case CHECKING: return "Page saved. Checking your Salon listing…";
+            case ANNOUNCING: return "Page saved. Submitting its Salon listing once…";
+            case WAITING: return "Page saved. Waiting for blockchain confirmation. Checking automatically; you can leave this page.";
+            case CONFIRMED: return "Published. Your page is saved and its Salon listing is confirmed.";
+            case UNKNOWN: return "Confirmation is taking longer. Check status to look again; this will not submit another announcement.";
+            case REJECTED: return "The node rejected the announcement. Your page is saved. Check the node, then try publishing again.";
+            case FAILED: return "Could not save publication status. Nothing was submitted.";
+            default: throw new IllegalArgumentException();
+        }
     }
 
     /** Burn any salon identity token that ISN'T your active one (e.g. a spare from

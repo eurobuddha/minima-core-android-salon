@@ -1,0 +1,44 @@
+Salon publication feedback and image zoom — 2026-10-19
+
+Pandamonium 2.0.24 (219), standalone Salon 0.11.40 (1140).
+
+Observed on Fold: profile announcement was on-chain at blocks 2375112 and
+2375115 while Edit still displayed pending. The purple floating spinner was a
+Wispr Flow overlay (com.wispr.flowapp), not Salon. No phone transaction was sent
+by the agent. User subsequently confirmed the profile was published.
+
+Reuse: SalonRegistry bounded coins scan, NftProof state parser (object/port array),
+Salon/Atelier save-before-post and confirmation polling. NFT Wallet ZoomImageView
+was reused with package/provenance changes only; gallery swipes defer to panning
+while zoomed. Single-image and carousel paths both use it.
+
+Publication now journals before submitting and checks the on-chain directory.
+Acknowledgement alone is not success. Pending survives recreation; another click
+checks only. Confirmed existing URL avoids redundant announcements (mutable page).
+Definite node rejection permits retry; lost/malformed replies remain uncertain.
+A bounded polling run ends with Check status, retaining the no-resubmit guard.
+Confirmation clears the profile/directory caches and takes an unchanged Edit
+screen to Discover. Publish spinner is inside the disabled button. Four host
+languages included. Standalone retains its existing English UI.
+
+Validation: 412 integrated Salon tests and 53 standalone tests passed; release
+lint passed for both; both signed APKs built. Native graphics gesture tests cover
+pinch enlargement, no accidental gallery navigation and reset on the next image.
+UI regression covers disabled button/spinner and Discover only after chain data.
+Adapter replay from previous committed sources and second pass match exactly.
+APK signatures match the Minima family release certificate. Host Keets bundle,
+21 linked addons per ABI and Bare runtime verified by release build.
+
+Review: callback duplication, identity/node ownership, persistence before write,
+uncertain versus definite failure, lifecycle stop, translation and gesture wiring
+reviewed. Corrected ambiguous reply handling before release. No open major finding.
+Physical confirmation flow and pinch still require verification on the new build;
+a second-phone Keets media read has not been verified in this task.
+
+Artifacts:
+minima-core-Pandamonium-2.0.24.apk
+SHA256 6276fc6bd0bb01f469d7371e8b571f0285972b2d6925bcd28c4ee679547df8c4
+Salon-0.11.40.apk
+SHA256 40e1a7e4d49b1704c53b4eda531a7acec531433a9cdb9a74afa7afccaa09c92d
+
+No unrelated parity work resumed. No public APK release made.

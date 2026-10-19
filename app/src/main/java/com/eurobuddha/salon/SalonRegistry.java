@@ -49,7 +49,7 @@ final class SalonRegistry {
 
     private SalonRegistry() {}
 
-    interface Announced { void done(boolean ok, String message); }
+    interface Announced { void done(boolean ok, String message); default void rejected(String message) { done(false,message); } }
     interface Listed { void done(List<Entry> entries); }
     interface Done { void done(int count); }
 
@@ -72,7 +72,8 @@ final class SalonRegistry {
                 // outage (S23, 2026-08-21); the callers mostly discard the message.
                 android.util.Log.d("SalonKeepAlive", "announce " + tokenid + " -> " + (ok ? "ok" : "FAIL: " + json.optString("error", json.toString())));
                 if (ok) cb.done(true, "Published to the Salon.");
-                else cb.done(false, json.optString("error", "publish failed"));
+                else if (Boolean.FALSE.equals(json.opt("status"))) cb.rejected(json.optString("error", "publish failed"));
+                else cb.done(false, "Publication response was incomplete.");
             }
             @Override public void onError(String m) {
                 android.util.Log.d("SalonKeepAlive", "announce " + tokenid + " -> ERROR: " + m);
