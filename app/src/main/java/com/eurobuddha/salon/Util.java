@@ -29,6 +29,25 @@ public final class Util {
         return "Token";
     }
 
+    /** Core balance TokenMeta.asObject, adapted from Minima JSON to org.json. */
+    static JSONObject asObject(Object value) {
+        if (value == null || value == JSONObject.NULL) return null;
+        if (value instanceof JSONObject) return (JSONObject) value;
+        String text = value.toString().trim();
+        if (text.startsWith("{")) {
+            try { return new JSONObject(text); }
+            catch (org.json.JSONException ignored) { }
+        }
+        return null;
+    }
+
+    /** Balance metadata or the existing tokens-command envelope used by StateNft. */
+    static JSONObject tokenObject(Object value) {
+        JSONObject root = asObject(value);
+        JSONObject nested = root == null ? null : asObject(root.opt("token"));
+        return nested == null ? root : nested;
+    }
+
     /** URLs ride the tokencreate command line outside JSON — no spaces, quotes or semicolons. */
     public static boolean validCmdUrl(String u) {
         if (u == null || u.isEmpty()) return true;

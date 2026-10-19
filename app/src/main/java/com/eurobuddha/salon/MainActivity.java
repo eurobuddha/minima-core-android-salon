@@ -1851,8 +1851,9 @@ public class MainActivity extends AppCompatActivity {
                 String base = "", ext = ".png";
                 JSONArray br = bal.optJSONArray("response");
                 JSONObject e0 = br == null || br.length() == 0 ? null : br.optJSONObject(0);
-                JSONObject tk = e0 == null ? null : e0.optJSONObject("token");
-                JSONObject src = tk != null && tk.opt("name") instanceof JSONObject ? tk.optJSONObject("name") : tk;
+                JSONObject tk = e0 == null ? null : Util.tokenObject(e0.opt("token"));
+                JSONObject src = tk == null ? null : Util.asObject(tk.opt("name"));
+                if (src == null) src = tk;
                 if (src != null && tk != null) {
                     base = firstNonEmpty(src.optString("base", ""), tk.optString("base", ""));
                     ext = firstNonEmpty(src.optString("ext", ""), tk.optString("ext", ""), ".png");
@@ -1983,9 +1984,11 @@ public class MainActivity extends AppCompatActivity {
                     JSONObject row = arr.optJSONObject(i); if (row == null) continue;
                     String tid = row.optString("tokenid", ""); if (tid.isEmpty() || tid.equals("0x00")) continue;
                     Object tok = row.opt("token"); String name = "", image = "";
-                    if (tok instanceof JSONObject) {
-                        JSONObject tm = (JSONObject) tok;
+                    JSONObject tm = Util.tokenObject(tok);
+                    if (tm != null) {
                         Object nm = tm.opt("name");
+                        JSONObject parsedName = Util.asObject(nm);
+                        if (parsedName != null) nm = parsedName;
                         // Atelier/StateNFT metadata is an envelope: the minted JSON (name, url,
                         // icon, mode, …) lives under token.name. Read the icon from there, then
                         // resolve <artimage>/base64/data:/http/ipfs into a renderable string.

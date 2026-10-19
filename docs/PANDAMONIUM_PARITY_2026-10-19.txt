@@ -15,3 +15,17 @@ Certificate SHA-256: eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700
 Candidate: _artifacts/salon-0.11.35.apk
 SHA-256: 264371c5496caf75d9b5fcc80c31c47689e8d2d91bb47ff4d02dfdce7598a966
 No installation or publication. Final rollout held for Fold check.
+
+0.11.36 / code1136 — NFT metadata and edition-image parity
+Reused adapt-pandamonium-salon-metadata.py and SalonMetadataTest from Pandamonium.
+The holdings picker and edition scan now decode JSON strings at the root,
+name and token-envelope layers. Existing icon aliases, IPFS resolution and
+embedded-edition priority retained. No credential/identity/storage changes.
+Tests adapted only for standalone dialog, strings and existing proof signature;
+all proof generation and node results mocked, no real signing or publishing.
+18 tests pass (8 metadata regressions). Offline release build and lint pass:
+0 errors, 107 warnings. Changed parser/callers/tests reviewed; no blocking finding
+in this port. Broader identity/recovery/hosting parity remains outstanding.
+Actual APK package/version and family release certificate verified.
+No install/publication. Candidate: _artifacts/salon-0.11.36.apk
+SHA256: 20ef1fdd5ad70c49eb34820370f20ddce6971d7a433345b219ea174da40f317c
