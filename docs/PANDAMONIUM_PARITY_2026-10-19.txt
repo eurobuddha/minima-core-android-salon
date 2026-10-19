@@ -1,0 +1,17 @@
+Standalone parity checkpoint: Salon 0.11.35 / code1135
+
+Reused scripts/pandamonium-sources/salon/HostingSecretField.java.inc and the reveal
+regression in HostingSecretFieldTest. Adapted existing standalone secret watcher,
+String labels and accessible descriptions. Password/PAT/JWT fields gain a 48dp
+reveal button, preserving selection and stored bytes; toggling never encrypts or
+saves. Existing destination profiles and keys stay in the standalone app's storage.
+10 tests passed; offline signed release passed; lint 0 errors / 107 warnings.
+Changed caller, field helper, tests and build configuration reviewed.
+No unresolved issue in this display port; secret persistence, recovery, publishing
+and other integrated Salon repairs still require standalone comparison/transfer.
+Actual APK package/version/certificate checked:
+package: name='com.eurobuddha.salon' versionCode='1135' versionName='0.11.35' platformBuildVersionName='16' platformBuildVersionCode='36' compileSdkVersion='36' compileSdkVersionCodename='16'
+Certificate SHA-256: eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
+Candidate: _artifacts/salon-0.11.35.apk
+SHA-256: 264371c5496caf75d9b5fcc80c31c47689e8d2d91bb47ff4d02dfdce7598a966
+No installation or publication. Final rollout held for Fold check.

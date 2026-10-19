@@ -3155,7 +3155,48 @@ public class MainActivity extends AppCompatActivity {
         parent.addView(e, new LinearLayout.LayoutParams(-1, -2)); return e;
     }
     private void cfgField(LinearLayout parent, JSONObject cfg, String key, String label, String hint, boolean secret) { EditText e = field(parent, label, cfg.optString(key, ""), secret, hint); e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, s))); }
-    private void cfgSecret(LinearLayout parent, JSONObject cfg, String key, String label) { EditText e = field(parent, label, Crypt.decrypt(cfg.optString(key, "")), true, "••••••"); e.addTextChangedListener(watch(s -> Hosting.put(cfg, key, Crypt.encrypt(s)))); }
+    private void cfgSecret(LinearLayout parent, JSONObject cfg, String key, String label) {
+        // Reuse Atelier's input/eye row and Backup PasswordField's selection-preserving toggle.
+        EditText e = field(parent, label, "", true, "••••••");
+        parent.removeView(e);
+        final int masked = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        final int shown = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        e.setInputType(masked);
+        e.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        e.setMinHeight(dp(48));
+        e.setText(Crypt.decrypt(cfg.optString(key, "")));
+        final android.text.TextWatcher secretWatcher = watch(value -> Hosting.put(cfg, key, Crypt.encrypt(value)));
+        e.addTextChangedListener(secretWatcher);
+        LinearLayout secretRow = row();
+        secretRow.setGravity(Gravity.CENTER_VERTICAL);
+        secretRow.addView(e, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView eye = Design.text(this, "👁", 18, Design.INK(), Design.sans());
+        eye.setGravity(Gravity.CENTER);
+        eye.setBackground(Design.ruled(this, Design.PAPER(), Design.INK(), 1));
+        eye.setClickable(true);
+        eye.setFocusable(true);
+        eye.setAlpha(0.5f);
+        eye.setContentDescription("Show password");
+        eye.setOnClickListener(v -> {
+            boolean hidden = (e.getInputType() & InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD;
+            int start = e.getSelectionStart(), end = e.getSelectionEnd();
+            // Android setInputType emits text callbacks even when the credential is unchanged.
+            e.removeTextChangedListener(secretWatcher);
+            try {
+                e.setInputType(hidden ? shown : masked);
+                e.setTypeface(Design.sans());
+                e.setSelection(Math.max(0, start), Math.max(0, end));
+            } finally { e.addTextChangedListener(secretWatcher); }
+            eye.setAlpha(hidden ? 1f : 0.5f);
+            eye.setContentDescription(hidden ? "Hide password" : "Show password");
+        });
+        LinearLayout.LayoutParams eyeParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+        eyeParams.leftMargin = dp(6);
+        secretRow.addView(eye, eyeParams);
+        parent.addView(secretRow, new LinearLayout.LayoutParams(-1, -2));
+    }
     private void cfgSecretMulti(LinearLayout parent, JSONObject cfg, String key, String label) {
         parent.addView(Design.text(this, label.toUpperCase(), 9.5f, Design.DIM(), Design.sansBold()), lp(0, 8, 0, 3));
         EditText e = new EditText(this); e.setText(Crypt.decrypt(cfg.optString(key, ""))); e.setTextColor(Design.INK()); e.setTextSize(11); e.setTypeface(Design.mono());

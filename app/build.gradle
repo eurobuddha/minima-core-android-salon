@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.salon"
         minSdk 28
         targetSdk 35
-        versionCode 1134
-        versionName "0.11.34"
+        versionCode 1135
+        versionName "0.11.35"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -44,6 +44,7 @@ android {
         }
     }
 
+    testOptions { unitTests.includeAndroidResources = true }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
@@ -62,6 +63,8 @@ android {
 }
 
 dependencies {
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'org.mockito:mockito-core:5.12.0'
     implementation libs.appcompat
     implementation libs.material
     implementation libs.activity
