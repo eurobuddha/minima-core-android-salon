@@ -1,0 +1,44 @@
+Salon gallery scroll handoff — 2026-10-19
+
+Problem: bounded Gallery/Posts/Holdings captured the entire touch gesture and
+released it only on UP/CANCEL. At an inner edge, the surrounding page stayed still.
+
+Change: retain the existing section sizing and content renderers. Use the already
+bundled AndroidX NestedScrollView for the page and BoundedScroll; remove the custom
+dispatchTouchEvent locks in both BoundedScroll and BoundedRecycler. AndroidX passes
+unconsumed movement through the nested parent chain, including SwipeRefreshLayout.
+No dependency, profile, identity, hosting, transaction or zoom implementation change.
+
+Reuse inspection: both Salon MainActivity implementations, renderGallery/photoGrid/
+videoCarousel, boundedBox and Posts callers; standalone NFTWallet/Filez and integrated
+Atelier, TerminalIDE SelectionScrollView. Terminal selection lock is intentionally
+whole-gesture and does not suit edge handoff. Existing Core SeedSyncActivity uses
+NestedScrollView. Inspected AndroidX core 1.19.0 NestedScrollView constructor,
+measurement, parent/child protocol and touch dispatch from Google's source artifact.
+
+Validation: new SalonScrollTest drives actual bounded widgets through page + refresh
+parent dispatch. Tests same-gesture bottom handoff without jumping, top handoff,
+internal/short gallery scrolling, RecyclerView edge handoff, horizontal video swipe
+and tap. Integrated: 417 tests, 0 failures/errors. Standalone: 58 tests, 0 failures/errors.
+Both release lint reports have 0 errors; both release APK builds passed. Host Keets
+bundle and all 21 addons/runtime per ABI verified. Canonical scroll adapter reproduces
+both MainActivity files from their previous HEAD and is idempotent.
+
+Code Review
+Summary: minimal widget substitution removes the conflicting gesture ownership.
+Existing renderers, height caps, recycling and touch targets are preserved.
+Findings: no blocking issues found in changed source, adapter, fixtures or tests.
+Verdict: Approve. Physical Fold gesture verification remains separate from automated tests.
+
+Identity question investigation (no code change): Salon tokens are created amount:1,
+decimals:0,signtoken:<creator>, without token script restriction. Core tokencreate
+uses RETURN TRUE by default; signtoken establishes creator provenance, not soulbinding.
+Existing configured Salon identity blocks automatic adoption. An unconfigured Salon
+may adopt a qualifying token from balance, including an unsolicited received token.
+Private messaging keys and Keets write credentials do not move with the token.
+Do not present token transfer alone as a complete account migration.
+
+Standalone Salon 0.11.41 / code 1141
+APK: dist/Salon-0.11.41.apk
+SHA256: f8732112f71d2a424258f72eb7b4d4484e7cdb39a70d60d70412fe957976c4d8
+Standalone not installed on Fold; no public release created for this build.

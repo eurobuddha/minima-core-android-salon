@@ -22,7 +22,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.MediaController;
-import android.widget.ScrollView;
+import androidx.core.widget.NestedScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -100,7 +100,7 @@ public class MainActivity extends AppCompatActivity {
     /** One tip in flight at a time. Tips move REAL value and have no node-side
      *  idempotency, so guard the whole check-balance→send round-trip. */
     private volatile boolean mTipInFlight = false;
-    private ScrollView scroll;
+    private NestedScrollView scroll;
     private androidx.swiperefreshlayout.widget.SwipeRefreshLayout swipe;
     private FrameLayout rootFrame;
     private TextView nodeChip;
@@ -155,7 +155,7 @@ public class MainActivity extends AppCompatActivity {
         appbar.setBackgroundColor(Design.PAPER());
         chrome.addView(appbar, new LinearLayout.LayoutParams(-1, -2));
 
-        scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false);
+        scroll = new NestedScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false);
         body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(16), dp(10), dp(16), dp(28));
         scroll.addView(body, new FrameLayout.LayoutParams(-1, -2));
@@ -1129,27 +1129,12 @@ public class MainActivity extends AppCompatActivity {
             // Wrap content up to maxHpx; beyond that, scroll inside this view.
             super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxHpx, MeasureSpec.AT_MOST));
         }
-        @Override public boolean dispatchTouchEvent(android.view.MotionEvent e) {
-            // The outer ScrollView is not a nested-scrolling parent, so it would
-            // steal every vertical drag. While this list actually has something to
-            // scroll, claim the gesture so it scrolls internally; release on lift so
-            // dragging over a non-scrolling window still pages the whole screen.
-            int a = e.getActionMasked();
-            if (a == android.view.MotionEvent.ACTION_DOWN) {
-                boolean scrollable = canScrollVertically(1) || canScrollVertically(-1);
-                if (scrollable && getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
-            } else if (a == android.view.MotionEvent.ACTION_UP || a == android.view.MotionEvent.ACTION_CANCEL) {
-                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-            }
-            return super.dispatchTouchEvent(e);
-        }
+
     }
 
-    /** A ScrollView that grows with its content up to a maximum height, then scrolls
-     *  internally — for heterogeneous sections (Gallery grid+carousel+list, Holdings
-     *  rows) that don't map cleanly onto an adapter. Same gesture-claim as
-     *  {@link BoundedRecycler} so the outer ScrollView doesn't steal the drag. */
-    private class BoundedScroll extends ScrollView {
+    /** Bounded gallery/holdings window. AndroidX passes movement beyond either
+     *  edge to the page in the same gesture, including RecyclerView posts. */
+    private class BoundedScroll extends NestedScrollView {
         private final int maxHpx;
         BoundedScroll(Context c, int maxHpx) {
             super(c);
@@ -1160,16 +1145,7 @@ public class MainActivity extends AppCompatActivity {
         @Override protected void onMeasure(int widthSpec, int heightSpec) {
             super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxHpx, MeasureSpec.AT_MOST));
         }
-        @Override public boolean dispatchTouchEvent(android.view.MotionEvent e) {
-            int a = e.getActionMasked();
-            if (a == android.view.MotionEvent.ACTION_DOWN) {
-                boolean scrollable = canScrollVertically(1) || canScrollVertically(-1);
-                if (scrollable && getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
-            } else if (a == android.view.MotionEvent.ACTION_UP || a == android.view.MotionEvent.ACTION_CANCEL) {
-                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-            }
-            return super.dispatchTouchEvent(e);
-        }
+
     }
 
     /** Wrap {@code content} in a fixed-height internal scroll if it would run long. */
