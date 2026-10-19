@@ -46,7 +46,16 @@ final class KeetsLink {
         int port=info.getInt("apiport");
         String drive=info.getString("salondrive").replaceFirst("^0x","");
         if(port<1024 || port>65535 || !drive.matches("[0-9a-f]{64}")) throw new IOException("Invalid Keets service response");
-        JSONObject file=await(cb -> api.file("get","keets/apitoken",null,null,cb));
+        // Filez's FILE bridge is rooted above Minima's versioned data directory.
+        // Ask the node to canonicalize the token location; never guess "1.1" or
+        // resolve another app's paths on Salon's own filesystem.
+        JSONObject status=await(cb -> api.cmd("status",30_000,cb));
+        String data=status.getJSONObject("response").getString("data");
+        if(!new File(data).isAbsolute()) throw new IOException("Invalid node data directory");
+        String tokenLocation=new File(data,"keets/apitoken").getPath();
+        JSONObject stat=await(cb -> api.file("stat",tokenLocation,null,null,cb));
+        String relative=tokenPath(stat);
+        JSONObject file=await(cb -> api.file("get",relative,null,null,cb));
         Uri uri=Uri.parse(file.getString("uri"));
         boolean internal="com.eurobuddha.pandamonium".equals(ctx.getPackageName());
         if(!"content".equals(uri.getScheme()) && !(internal && "file".equals(uri.getScheme())))
@@ -62,6 +71,17 @@ final class KeetsLink {
             throw new IOException("The node changed. Reopen Salon and try again.");
         if(node!=api) throw new IOException("The node connection changed. Try again.");
         session=candidate;return candidate;
+    }
+    /** Both canonical paths come from the node's existing FILE stat response. */
+    static String tokenPath(JSONObject stat) throws IOException {
+        if(!stat.optBoolean("exists") || stat.optBoolean("isdir") || stat.optLong("size",0)<1
+                || stat.optLong("size",0)>128) throw new IOException("Keets is starting. Try again shortly.");
+        java.nio.file.Path base=java.nio.file.Paths.get(stat.optString("base","")).normalize();
+        java.nio.file.Path file=java.nio.file.Paths.get(stat.optString("canonical","")).normalize();
+        if(!base.isAbsolute() || !file.isAbsolute() || !file.startsWith(base)
+                || !file.endsWith(java.nio.file.Paths.get("keets","apitoken")))
+            throw new IOException("Invalid node file response");
+        return base.relativize(file).toString();
     }
     static final class Session {
         final int port; private final String token; final String drive;
