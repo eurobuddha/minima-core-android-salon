@@ -145,6 +145,18 @@ public class NodeApi {
     }
 
     public void cmd(String command, long timeoutMs, Cb cb) {
+        mMain.post(() -> request(timeoutFor(command) == WRITE_TIMEOUT_MS, timeoutMs,
+                listener -> mApi.Command(command, listener), cb));
+    }
+
+    /** Filez's existing content-URI bridge; permission checks remain on the node. */
+    public void file(String action, String path, String newPath, android.net.Uri uri, Cb cb) {
+        mMain.post(() -> request(true, WRITE_TIMEOUT_MS,
+                listener -> mApi.FileCommand(action, path, newPath, uri, listener), cb));
+    }
+
+    private void request(boolean isWrite, long timeoutMs,
+            java.util.function.Consumer<MinimaAPIListener> sender, Cb cb) {
         if (mReleased) {
             // ALWAYS dispatch: a caller that never hears back can wedge forever — BookRepository
             // sets `scanning = true` before calling and only clears it in the callback, so a
@@ -157,7 +169,6 @@ public class NodeApi {
             if (cb != null) mMain.post(() -> cb.onError("Node API released"));
             return;
         }
-        final boolean isWrite = timeoutFor(command) == WRITE_TIMEOUT_MS;
         if (isWrite) mPendingWrites++;
         final boolean[] done = {false};
         final Runnable[] ref = new Runnable[1];
@@ -179,7 +190,7 @@ public class NodeApi {
         mPending.add(timeout);
         mMain.postDelayed(timeout, timeoutMs);
 
-        mApi.Command(command, new MinimaAPIListener() {
+        sender.accept(new MinimaAPIListener() {
             @Override
             public void response(JSONObject zResponse) {
                 mMain.post(() -> {

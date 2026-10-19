@@ -216,6 +216,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         node = new NodeApi(this, enabled -> runOnUiThread(() -> { nodeUp = enabled; onNode(); }));
+        KeetsLink.connect(this, node);
         startPairingRetry();   // re-broadcast REGISTER while unpaired (recovers if Salon starts before Minima Core, e.g. after reboot)
         if (android.os.Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
@@ -1031,6 +1032,7 @@ public class MainActivity extends AppCompatActivity {
         reannHandler.removeCallbacks(reannTick);
         io.shutdownNow();
         stopAudio();
+        KeetsLink.release(node);
         if (node != null) node.onDestroy();   // release the MinimaAPI receiver + cancel pending IPC timeouts
     }
 
@@ -1220,31 +1222,39 @@ public class MainActivity extends AppCompatActivity {
     /** Re-host profile.json (+ the public web renderer). Refreshes each holding's
      *  published editions FIRST so viewers get the full StateNFT collection. */
     private void hostProfile(TextView status, Runnable done) {
+        if (deviceMediaBusy || deviceProfileBusy) { if(status!=null) status.setText("A publication or media upload is already in progress."); return; }
         refreshEditionsThen(() -> doHostProfile(status, done));
     }
 
     private void doHostProfile(TextView status, Runnable done) {
+        if (deviceMediaBusy || deviceProfileBusy) return;
         Hosting.Profile def = HostingStore.getDefault(this);
         if (def == null) { if (status != null) status.setText("Set hosting first."); return; }
         String handle = SalonStore.get(this, "handle");
         if (status != null) status.setText("Publishing your page…");
         JSONObject profile = buildProfileJson();
+        final String publicationOwner=mediaOwner();
+        final String publicationDraft=SalonStore.me(this).toString();
+        deviceProfileBusy=true;
         io.execute(() -> {
             try (Hosting.Uploader up = Hosting.forProfile(def)) {
                 String url = up.putFile(profile.toString().getBytes("UTF-8"), handle + "/profile.json", "application/json");
                 // The encrypted relay isn't a web host, and on content-addressed Blossom
                 // the renderer's relative fetch('./profile.json') can never resolve —
                 // skip the browser renderer for both.
-                if (!Hosting.TYPE_RELAY.equals(def.type()) && !Hosting.TYPE_BLOSSOM.equals(def.type()))
+                if (!Hosting.TYPE_KEETS.equals(def.type()) && !Hosting.TYPE_RELAY.equals(def.type()) && !Hosting.TYPE_BLOSSOM.equals(def.type()))
                     try { up.putFile(SALON_HTML.getBytes("UTF-8"), handle + "/index.html", "text/html"); } catch (Exception ignore) {}
                 Hosting.verifyUrl(url, def);
                 mProfileCache.remove(url);   // your edit is live — don't serve the stale cached copy
                 runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || !publicationOwner.equals(mediaOwner())
+                            || !publicationDraft.equals(SalonStore.me(this).toString())) return;
                     SalonStore.put(this, "profileUrl", url);
                     if (status != null) status.setText("Live.");
                     if (done != null) done.run();
                 });
             } catch (Exception e) { runOnUiThread(() -> { if (status != null) status.setText("Publish failed: " + e.getMessage()); }); }
+            finally { runOnUiThread(() -> deviceProfileBusy=false); }
         });
     }
 
@@ -1439,7 +1449,7 @@ public class MainActivity extends AppCompatActivity {
                 c.addView(Design.note(this, "Couldn't reach @" + viewEntry.handle + "'s page — their host may be offline."));
                 LinearLayout er = row();
                 er.addView(btn("Try again", true, () -> openProfile(viewEntry)), weight(48, 0, 4));
-                er.addView(btn("Open in browser", false, () -> openUrl(viewEntry.url)), weight(48, 4, 0));
+                if (!KeetsRef.isRef(viewEntry.url)) er.addView(btn("Open in browser", false, () -> openUrl(viewEntry.url)), weight(48, 4, 0));
                 c.addView(er, lp(0, 10, 0, 0));
                 body.addView(c, lp(0, 0, 0, 12));
             } else body.addView(Design.note(this, "Loading @" + viewEntry.handle + "'s page…"), lp(0, 0, 0, 12));
@@ -1910,7 +1920,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean isPublishableEditionUrl(String u) {
         if (u == null || u.length() >= 1024) return false;
         String s = u.trim().toLowerCase();
-        return s.startsWith("http://") || s.startsWith("https://") || s.startsWith("ipfs:")
+        return KeetsRef.isRef(s) || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("ipfs:")
                 || s.startsWith("ar://") || s.startsWith("relay1:") || s.startsWith("mx1:");
     }
 
@@ -2217,22 +2227,29 @@ public class MainActivity extends AppCompatActivity {
                     Hosting.Profile host = MaximaLink.isReady(this)
                             ? Hosting.Profile.fresh(Hosting.TYPE_MAXIMA)
                             : HostingStore.getDefault(this);
-                    if (host == null) { runOnUiThread(() -> toast("Set up hosting (or install Maxima) to send photos")); return; }
+                    if (host == null || Hosting.TYPE_KEETS.equals(host.type())) { runOnUiThread(() -> toast("Choose a private-photo host or connect Maxima. Public device hosting is not used for private photos.")); return; }
                     String ref = Hosting.forProfile(host).putFile(jpeg, "dm.jpg", "image/jpeg");
                     runOnUiThread(() -> sendDm("", ref, "image/jpeg"));
                 } catch (Exception e) { runOnUiThread(() -> toast("Photo failed: " + e.getMessage())); }
             });
             return;
         }
+        if (deviceMediaBusy || deviceProfileBusy) { toast("A publication or media upload is already in progress."); return; }
+        final Hosting.Profile pickedHost = HostingStore.getDefault(this);
+        if (pickedHost == null) { toast("Set a hosting destination first."); return; }
+        final JSONObject pickedProfile = buildProfileJson();
+        final String pickedOwner = mediaOwner();
+        final String pickedHandle = SalonStore.get(this, "handle");
+        deviceMediaBusy = true;
         toast("Uploading…");   // profStatus is at the bottom of a long scroll — give visible feedback here too
         if (profStatus != null) profStatus.setText("Uploading…");
         io.execute(() -> {
             try {
-                String handle = SalonStore.get(this, "handle");
-                Hosting.Profile def = HostingStore.getDefault(this);
+                String handle = pickedHandle;
+                Hosting.Profile def = pickedHost;
                 byte[] bytes; String ext, mime, kind;
-                if (r == PICK_GALLERY_VID) { bytes = readCapped(uri, 60); ext = ".mp4"; mime = "video/mp4"; kind = "video"; }
-                else if (r == PICK_GALLERY_AUD) { bytes = readCapped(uri, 25); ext = ".mp3"; mime = "audio/mpeg"; kind = "audio"; }
+                if (r == PICK_GALLERY_VID) { bytes = readCapped(uri, Hosting.TYPE_KEETS.equals(def.type()) ? 24 : 60); ext = ".mp4"; mime = "video/mp4"; kind = "video"; }
+                else if (r == PICK_GALLERY_AUD) { bytes = readCapped(uri, Hosting.TYPE_KEETS.equals(def.type()) ? 24 : 25); ext = ".mp3"; mime = "audio/mpeg"; kind = "audio"; }
                 else { bytes = readScaledJpeg(uri, r == PICK_AVATAR ? 640 : 1400); ext = ".jpg"; mime = "image/jpeg"; kind = "image"; }
                 String rel = handle + "/media/" + kind + "-" + Long.toString(System.currentTimeMillis(), 36) + ext;
                 // Maxima mesh only: enforce the per-profile total BEFORE any IPC/publish, so a
@@ -2247,16 +2264,29 @@ public class MainActivity extends AppCompatActivity {
                         return;
                     }
                 }
+                if (!pickedOwner.equals(mediaOwner())) throw new Exception("Your Salon changed. Please choose the file again.");
+                if (Hosting.TYPE_KEETS.equals(def.type())) KeetsRef.checkAddition(pickedProfile,
+                        r == PICK_AVATAR ? "avatar" : r == PICK_BANNER ? "banner" : "gallery", handle, bytes, mime);
                 final String url;
                 try (Hosting.Uploader up = Hosting.forProfile(def)) { url = up.putFile(bytes, rel, mime); }
                 runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || !pickedOwner.equals(mediaOwner())) return;
                     if (r == PICK_AVATAR && edAvatar != null) { edAvatar.setText(url); SalonStore.put(this, "avatar", url); render(); }
                     else if (r == PICK_BANNER && edBanner != null) { edBanner.setText(url); SalonStore.put(this, "banner", url); render(); }
                     else promptMediaTitle(kind, url);
                     if (profStatus != null) profStatus.setText("Uploaded.");
                 });
             } catch (Exception e) { runOnUiThread(() -> { if (profStatus != null) profStatus.setText("Upload failed: " + e.getMessage()); }); }
+            finally { runOnUiThread(() -> deviceMediaBusy = false); }
         });
+    }
+
+    private boolean deviceMediaBusy, deviceProfileBusy;
+    private String mediaOwner() {
+        JSONObject me=SalonStore.me(this);
+        Hosting.Profile host=HostingStore.getDefault(this);
+        return new JSONArray().put(me.optString("handle")).put(me.optString("tokenid"))
+                .put(me.optString("msgpk")).put(host==null ? "" : host.j.toString()).toString();
     }
 
     private void promptMediaTitle(String kind, String url) {
@@ -2623,7 +2653,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void claimIdentity(String handle, String name, String bio, TextView status) {
-        if (claiming) { status.setText("Already claiming — please wait."); return; }
+        if (claiming || deviceMediaBusy || deviceProfileBusy) { status.setText("Already working — please wait."); return; }
         handle = Hosting.slug(handle);
         if (handle.isEmpty() || name.trim().isEmpty()) { status.setText("Handle and display name are required."); return; }
         Hosting.Profile def = HostingStore.getDefault(this);
@@ -2634,18 +2664,23 @@ public class MainActivity extends AppCompatActivity {
         final String h = handle, n = name.trim(), b = bio.trim();
         SalonStore.put(this, "handle", h); SalonStore.put(this, "name", n); SalonStore.put(this, "bio", b);
         status.setText("Publishing your page…");
+        final JSONObject profile = buildProfileJson();
+        final String claimOwner = mediaOwner();
+        final NodeApi claimNode = node;
         io.execute(() -> {
             try {
-                JSONObject profile = buildProfileJson();
                 final String profileUrl;
                 try (Hosting.Uploader up = Hosting.forProfile(def)) {
                     profileUrl = up.putFile(profile.toString().getBytes("UTF-8"), h + "/profile.json", "application/json");
                     // Content-addressed Blossom: relative fetch can't work — skip the renderer.
-                    if (!Hosting.TYPE_RELAY.equals(def.type()) && !Hosting.TYPE_BLOSSOM.equals(def.type()))
+                    if (!Hosting.TYPE_KEETS.equals(def.type()) && !Hosting.TYPE_RELAY.equals(def.type()) && !Hosting.TYPE_BLOSSOM.equals(def.type()))
                         try { up.putFile(SALON_HTML.getBytes("UTF-8"), h + "/index.html", "text/html"); } catch (Exception ignore) {}
                 }
                 Hosting.verifyUrl(profileUrl, def);
-                runOnUiThread(() -> { SalonStore.put(this, "profileUrl", profileUrl); status.setText("Page live. Checking identity…"); adoptOrMint(h, n, b, profileUrl, status); });
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || node != claimNode || !claimOwner.equals(mediaOwner())) { claimFailed(); return; }
+                    SalonStore.put(this, "profileUrl", profileUrl); status.setText("Page live. Checking identity…"); adoptOrMint(h, n, b, profileUrl, status);
+                });
             } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> { promptTrustHostKey(def, hk.fingerprint, status); claimFailed(); }); }
             catch (Exception e) { runOnUiThread(() -> { status.setText("Hosting failed: " + e.getMessage()); claimFailed(); }); }
         });
@@ -2869,6 +2904,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void renderHosting() {
         masthead("Hosting");
+        body.addView(btn("Host on this device · 24 MB", true, this::quickStartKeets), lph(48, 0, 0, 0, 12));
         List<Hosting.Profile> profiles = HostingStore.list(this);
         if (profiles.isEmpty()) { LinearLayout e = card(); e.addView(Design.note(this, "No destinations yet. Add one — SFTP uploads straight to your own server.")); body.addView(e, lp(0, 0, 0, 12)); }
         for (Hosting.Profile p : profiles) {
@@ -2889,8 +2925,8 @@ public class MainActivity extends AppCompatActivity {
 
     // RETIRED (MaxLite sunset) — encrypted relay dropped from the picker. To restore, re-add
     // Hosting.TYPE_RELAY to HTYPES and "Encrypted relay" to HLABELS at the same index.
-    private static final String[] HTYPES = { Hosting.TYPE_BLOSSOM, Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_MAXIMA };
-    private static final String[] HLABELS = { "Blossom", "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Maxima mesh" };
+    private static final String[] HTYPES = { Hosting.TYPE_KEETS, Hosting.TYPE_BLOSSOM, Hosting.TYPE_SFTP, Hosting.TYPE_WEBDAV, Hosting.TYPE_KUBO, Hosting.TYPE_PINATA, Hosting.TYPE_GITHUB, Hosting.TYPE_MAXIMA };
+    private static final String[] HLABELS = { "Host on this device", "Blossom", "SFTP", "WebDAV", "IPFS node", "Pinata", "GitHub", "Maxima mesh" };
 
     private void renderHostingEdit() {
         masthead(hostEdit == null ? "Add destination" : "Edit destination");
@@ -2908,6 +2944,11 @@ public class MainActivity extends AppCompatActivity {
         card.addView(hs, lp(0, 0, 0, 6));
         JSONObject cfg = p.cfg();
         switch (p.type()) {
+            case Hosting.TYPE_KEETS:
+                card.addView(Design.note(this, "Host your public profile and media on this phone through Keets. No hosting account needed. Keep your node running and connected for others to view it. Copies held by other users may remain available while you are offline.\n\nViewable in Salon and compatible Keets apps, not ordinary browsers. Photos sent privately are not uploaded here.\n\n24 MB total per profile, including media. Existing external links stay with their current hosts."), lp(0, 6, 0, 2));
+                try { card.addView(Design.note(this, "Profile usage: " + mibOf(KeetsRef.usage(buildProfileJson())) + " / 24 MB"), lp(0, 6, 0, 2)); }
+                catch (Exception full) { card.addView(Design.note(this, full.getMessage()), lp(0, 6, 0, 2)); }
+                break;
             case Hosting.TYPE_SFTP:
                 cfgField(card, cfg, "host", "Host", "31.125.188.214", false); cfgField(card, cfg, "port", "Port", "22", false); cfgField(card, cfg, "user", "User", "root", false);
                 boolean keyAuth = "key".equals(cfg.optString("auth", "password"));
@@ -2979,7 +3020,12 @@ public class MainActivity extends AppCompatActivity {
         if (status != null) status.setText("Testing…"); else toast("Testing " + p.name() + "…");
         io.execute(() -> {
             String msg;
-            try { String rel = "_test/probe-" + Long.toString(System.currentTimeMillis(), 36) + ".txt";
+            try { if (Hosting.TYPE_KEETS.equals(p.type())) {
+                    KeetsLink.ready();
+                    runOnUiThread(() -> { if (status != null) status.setText("Keets ready — this device can host your Salon."); else toast("Keets ready"); });
+                    return;
+                }
+                String rel = "_test/probe-" + Long.toString(System.currentTimeMillis(), 36) + ".txt";
                 String url; try (Hosting.Uploader up = Hosting.forProfile(p)) { url = up.putFile(("salon-test").getBytes("UTF-8"), rel, "text/plain"); }
                 Hosting.verifyUrl(url, p); msg = "OK — uploaded and served: " + url;
             } catch (SftpUploader.HostKeyUnverified hk) { runOnUiThread(() -> promptTrustHostKey(p, hk.fingerprint, status)); return;
@@ -3250,6 +3296,16 @@ public class MainActivity extends AppCompatActivity {
             }
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
         } catch (Exception e) { toast("Couldn't open link"); }
+    }
+
+    private void quickStartKeets() {
+        new android.app.AlertDialog.Builder(this).setTitle("Host on this device")
+                .setMessage("Your public Salon profile and media will be served from this phone through Keets. Keep your node running and connected. Viewers need Salon or a compatible Keets app. Your total profile allowance is 24 MB.")
+                .setNegativeButton("Cancel", null).setPositiveButton("Use this device", (d,w) -> {
+                    Hosting.Profile p=Hosting.Profile.fresh(Hosting.TYPE_KEETS);
+                    Hosting.put(p.j,"name","This device (Keets)");saveHost(p);HostingStore.setDefault(this,p.id());
+                    render();testProfile(p);
+                }).show();
     }
 
     /** One-tap: create + default a Blossom hosting profile (no server needed). */

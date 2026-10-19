@@ -1,0 +1,41 @@
+Salon 0.11.38 — Host on this device (Keets)
+
+Choose Hosting > Host on this device, confirm the public-hosting explanation,
+and keep the Keets node running and online. Publish the Salon profile normally;
+Discovery and profile, image, audio and video readers use the existing resolver.
+Requires a node with Keets 1.2.1 / boundedMedia and salondrive capabilities
+(PandaBear, BlackBear or Pandamonium 2.0.22 builds). Older nodes fail clearly.
+Standalone Salon uses its existing node pairing and the node FILE permission.
+This release does not turn the phone into an ordinary browser website.
+
+Limit: 24 MiB for serialized UTF-8 profile JSON plus unique Keets media referenced
+by that profile. JSON is limited to 1 MiB; images to the existing 8 MiB reader
+ceiling. Replacing an avatar accounts for the replacement. Upload selection and
+profile publication both check the total. External links keep their existing hosts;
+no existing remote media is silently copied. This is an active-profile allowance,
+not a cap on Hyperdrive historical blocks, orphaned uploads or peer cache storage.
+
+Public Salon files use their own drive namespace; existing chat attachment drive
+keys remain unchanged. Private-photo fallback refuses public device hosting.
+Media URLs include byte length and SHA-256; uploads are read back and checked.
+The profile URL is stable, authenticated by its Hyperdrive, and reads update it.
+The per-boot API credential is held only in memory. Requests use authenticated
+loopback HTTP, no redirects or proxy, bounded response reads and a 50-second
+request watchdog. No automatic publish retry creates a second write.
+
+Reuse inspected: Salon Hosting/Uploader, RelayResolver, NodeApi, Maxima hosting
+budget and existing media controls; Filez/MinimaAPI FileCommand and native node
+file provider; Keets sidecar media.js/api.js and private services-test fixture.
+Only a small uploader/reference/client adapter was added. Pandamonium uses these
+same three Java sources through its canonical integration adapter, preserving
+existing lifecycle, profile publishing, ownership and language adaptations.
+
+Validation: full standalone unit suite, release lint and signed release build.
+Keets tests cover strict links, aggregate limits, replacement budgets, readback
+integrity, stable profile links, authenticated loopback reads and redirect refusal.
+Two private sidecars tested intact P2P media, bad hashes, over-limit refusal,
+public-drive separation and mutable profile updates. Repeated under Bare 1.34.1
+with a 25,164,800-byte synthetic file; all media checks passed.
+No phone installation, physical Android end-to-end publishing, or personal data
+publication was performed. The desktop Bare test does not claim to validate the
+Android Worklet's memory limit on a phone. Unrelated parity work remains paused.

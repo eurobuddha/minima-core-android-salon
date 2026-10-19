@@ -28,7 +28,7 @@ final class RelayResolver {
 
     /** Any resolvable media ref: the legacy MaxLite relay OR the Maxima mesh. */
     static boolean isMediaRef(String s) {
-        return isRelayRef(s) || MaximaLink.isMediaRef(s);
+        return isRelayRef(s) || MaximaLink.isMediaRef(s) || KeetsRef.isRef(s);
     }
 
     static final class Media { final byte[] bytes; final String mime; Media(byte[] b, String m) { bytes = b; mime = m; } }
@@ -40,6 +40,7 @@ final class RelayResolver {
 
     /** Fetch + decrypt a ref to bytes + mime. Handles both schemes. */
     static Media resolveBytes(String ref) throws Exception {
+        if (KeetsRef.isRef(ref)) return new Media(KeetsLink.fetch(ref), KeetsRef.parse(ref).mime);
         // Maxima mesh: the transport does the fetch/verify/decrypt; we just read
         // the mime out of the (base64url) manifest for display.
         if (MaximaLink.isMediaRef(ref)) {
