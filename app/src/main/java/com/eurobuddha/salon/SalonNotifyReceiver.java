@@ -32,9 +32,9 @@ public class SalonNotifyReceiver extends BroadcastReceiver {
     static final String CHANNEL = "salon_activity";
 
     @Override public void onReceive(Context ctx, Intent intent) {
-        if (!Objects.equals(intent.getAction(), MinimaAPIMessages.MINIMA_API_NOTIFY)) return;
+        if (!MinimaAPI.isNotify(intent.getAction())) return;
         if (!MinimaAPI.checkMinimaID(ctx, intent)) return;   // only our paired node
-        final String message = intent.getStringExtra(MinimaAPIMessages.MINIMA_API_NOTIFY_DATA);
+        final String message = MinimaAPI.notifyData(intent);
         if (message == null) return;
         // In-app libsodium decrypt + SQLite are too heavy for the broadcast thread's ANR
         // budget (esp. first-run native-lib load) — hand off and finish asynchronously.

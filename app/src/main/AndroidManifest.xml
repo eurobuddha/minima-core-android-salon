@@ -40,6 +40,8 @@
         <receiver android:name=".SalonNotifyReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="com.eurobuddha.minimacore.NOTIFY" />
+                <action android:name="org.minima.core.NOTIFY" />
+                <action android:name="org.minimarex.minimacore.NOTIFY" />
             </intent-filter>
         </receiver>
         <!-- The Maxima transport talks back here (replies, inbound DMs, events).
